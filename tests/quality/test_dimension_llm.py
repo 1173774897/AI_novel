@@ -26,6 +26,7 @@ from src.novel.quality.judge import (
     _CHAPTER_START,
     _RUBRIC_NARRATIVE_FLOW,
     _RUBRIC_PLOT_ADVANCEMENT,
+    _provider_key_available,
     _sanitize_chapter_text,
     _safe_token_usage,
     auto_select_judge,
@@ -125,7 +126,8 @@ class TestAutoSelectJudgeKeyMissing:
         monkeypatch.setenv("DEEPSEEK_API_KEY", "fake-deepseek")
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-        # ollama 在 _provider_key_available 里视为可用（本地服务），排除之
+        # ollama 模块未装时 _provider_key_available 返回 False，无需 mock；
+        # 但生产/测试机可能装了 ollama，统一 stub 掉避免环境差异
         import src.novel.quality.judge as judge_mod
         monkeypatch.setattr(
             judge_mod,
@@ -149,6 +151,63 @@ class TestAutoSelectJudgeKeyMissing:
         # preferred 仍是 gemini（写给下游抛错，不静默掩盖）
         assert cfg.provider == "gemini"
         assert cfg.same_source is False
+
+
+class TestProviderKeyAvailable:
+    """``_provider_key_available`` 直接单测：ollama 模块缺失不应被认为可用。
+
+    Why: 冒烟时观察到 ollama 模块未装但 ``_provider_key_available("ollama")``
+    返回 True，导致 ``auto_select_judge`` 把 ollama 当 fallback 选中，下游
+    LLM factory ``import ollama`` 抛 ModuleNotFoundError → 整个 fallback
+    链失效（all judge calls fail，分数全 0）。
+    """
+
+    def test_ollama_unavailable_when_module_missing(self, monkeypatch):
+        """没装 ollama 模块 → 返回 False，让 fallback 链继续走。"""
+        import sys
+
+        monkeypatch.setitem(sys.modules, "ollama", None)
+        assert _provider_key_available("ollama") is False
+
+    def test_ollama_available_when_module_installed(self, monkeypatch):
+        """装了 ollama 模块 → 即使无 OLLAMA_HOST 也视为可用（本地默认服务）。"""
+        import sys
+        import types
+
+        fake_ollama = types.ModuleType("ollama")
+        monkeypatch.setitem(sys.modules, "ollama", fake_ollama)
+        monkeypatch.delenv("OLLAMA_HOST", raising=False)
+        assert _provider_key_available("ollama") is True
+
+    def test_unknown_provider_returns_false(self):
+        assert _provider_key_available("nonexistent") is False
+        assert _provider_key_available("") is False
+
+    def test_keyed_provider_checks_env(self, monkeypatch):
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
+        assert _provider_key_available("deepseek") is True
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "")
+        assert _provider_key_available("deepseek") is False
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "  ")
+        assert _provider_key_available("deepseek") is False
+
+
+class TestAutoSelectJudgeOllamaFallback:
+    """回归冒烟 bug：ollama 模块缺失时不该被 fallback 选中。"""
+
+    def test_ollama_module_missing_falls_back_to_same_source(self, monkeypatch):
+        """Writer=deepseek，无 Gemini/OpenAI key，ollama 模块未装 →
+        fallback 链跳过 ollama，退化为同源 deepseek。
+        """
+        import sys
+
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "fake-deepseek")
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setitem(sys.modules, "ollama", None)
+        cfg = auto_select_judge("deepseek")
+        assert cfg.provider == "deepseek"
+        assert cfg.same_source is True
 
 
 # ---------------------------------------------------------------------------

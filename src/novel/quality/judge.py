@@ -85,7 +85,13 @@ def _provider_key_available(provider: str) -> bool:
     if not env_name:
         return False
     if provider == "ollama":
-        # Ollama 允许无 OLLAMA_HOST（有默认 http://localhost:11434），视为可用
+        # Ollama 允许无 OLLAMA_HOST（有默认 http://localhost:11434），但必须装了 ollama 模块。
+        # 否则下游 LLM factory 会抛 ModuleNotFoundError，让 fallback 链完全失效。
+        # server-up 探活由下游 LLM factory 负责（避免 judge 选择路径每次都加 2s 健康检查）。
+        try:
+            import ollama  # noqa: F401
+        except ImportError:
+            return False
         return True
     return bool(os.environ.get(env_name, "").strip())
 
