@@ -147,7 +147,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--judge-model",
         default="",
-        help="覆盖 judge 模型 (异源自动选择的结果)",
+        help=(
+            "覆盖 judge 模型（异源自动选择的结果）。"
+            "注意：SiliconFlow 的 GLM-4.5-Air / GLM-4.5V 不支持 json_mode，"
+            "用作 judge 会触发解析 fallback 评分丢失，请选 GLM-4.6 / GLM-4-32B-0414 / GLM-Z1-32B-0414。"
+        ),
     )
     parser.add_argument(
         "--eval-only",
@@ -218,6 +222,8 @@ def auto_select_judge_from_env(override_model: str = "") -> "Any":
         writer_provider = "deepseek"
     elif os.environ.get("GEMINI_API_KEY"):
         writer_provider = "gemini"
+    elif os.environ.get("SILICONFLOW_API_KEY"):
+        writer_provider = "siliconflow"
     elif os.environ.get("OPENAI_API_KEY"):
         writer_provider = "openai"
 

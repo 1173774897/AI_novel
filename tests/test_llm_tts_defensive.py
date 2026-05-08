@@ -906,3 +906,51 @@ class TestCreateLLMClient:
 
         assert isinstance(client, OllamaBackend)
         assert client._model == "llama3"
+
+    def test_siliconflow_provider_creates_openai_backend(self):
+        """SiliconFlow provider should reuse OpenAIBackend with siliconflow base_url."""
+        from src.llm.llm_client import create_llm_client
+        from src.llm.openai_backend import OpenAIBackend
+
+        with patch.dict("os.environ", {"SILICONFLOW_API_KEY": "fake-sf"}):
+            client = create_llm_client({"provider": "siliconflow"})
+
+        assert isinstance(client, OpenAIBackend)
+        assert client._base_url == "https://api.siliconflow.cn/v1"
+        assert client._api_key_env == "SILICONFLOW_API_KEY"
+        assert client._model == "zai-org/GLM-4.6"  # 默认 GLM 旗舰，支持 json_mode
+
+    def test_siliconflow_user_can_override_model(self):
+        """User-supplied model should override SiliconFlow default."""
+        from src.llm.llm_client import create_llm_client
+        from src.llm.openai_backend import OpenAIBackend
+
+        with patch.dict("os.environ", {"SILICONFLOW_API_KEY": "fake-sf"}):
+            client = create_llm_client(
+                {"provider": "siliconflow", "model": "THUDM/GLM-Z1-32B-0414"}
+            )
+
+        assert isinstance(client, OpenAIBackend)
+        assert client._model == "THUDM/GLM-Z1-32B-0414"
+        assert client._base_url == "https://api.siliconflow.cn/v1"
+
+    def test_siliconflow_missing_api_key_raises(self):
+        """SiliconFlow provider without SILICONFLOW_API_KEY should raise RuntimeError."""
+        from src.llm.llm_client import create_llm_client
+
+        with patch.dict("os.environ", {}, clear=True):
+            with pytest.raises(RuntimeError, match="未找到 API Key"):
+                create_llm_client({"provider": "siliconflow"})
+
+    def test_auto_detect_picks_siliconflow_when_only_key(self):
+        """Auto-detect with only SILICONFLOW_API_KEY should pick siliconflow."""
+        from src.llm.llm_client import create_llm_client
+        from src.llm.openai_backend import OpenAIBackend
+
+        with patch.dict(
+            "os.environ", {"SILICONFLOW_API_KEY": "fake-sf"}, clear=True
+        ):
+            client = create_llm_client({"provider": "auto"})
+
+        assert isinstance(client, OpenAIBackend)
+        assert client._base_url == "https://api.siliconflow.cn/v1"

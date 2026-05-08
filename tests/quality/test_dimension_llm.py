@@ -153,6 +153,67 @@ class TestAutoSelectJudgeKeyMissing:
         assert cfg.same_source is False
 
 
+class TestAutoSelectJudgeSiliconFlow:
+    """SiliconFlow provider 接入回归。
+
+    Why: 用户场景 — DEEPSEEK_API_KEY 写作 + 仅 SILICONFLOW_API_KEY 可用，
+    fallback 链应选 SiliconFlow（异源 GLM judge），不应退化同源。
+    """
+
+    def test_writer_deepseek_only_siliconflow_key_picks_siliconflow(self, monkeypatch):
+        import sys
+
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "fake-deepseek")
+        monkeypatch.setenv("SILICONFLOW_API_KEY", "fake-siliconflow")
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setitem(sys.modules, "ollama", None)
+        cfg = auto_select_judge("deepseek")
+        assert cfg.provider == "siliconflow"
+        assert cfg.model == "zai-org/GLM-4.6"
+        assert cfg.same_source is False
+
+    def test_writer_siliconflow_maps_to_gemini_preferred(self, monkeypatch):
+        """Writer=siliconflow，preferred 是 gemini；gemini key 缺失时回退到其他异源。"""
+        import sys
+
+        monkeypatch.setenv("SILICONFLOW_API_KEY", "fake-siliconflow")
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-gemini")
+        cfg = auto_select_judge("siliconflow")
+        assert cfg.provider == "gemini"
+        assert cfg.same_source is False
+
+    def test_writer_siliconflow_no_cross_falls_back_to_same_source(self, monkeypatch):
+        """Writer=siliconflow + 无任何其他 key + ollama 模块缺失 → 退化同源。"""
+        import sys
+
+        monkeypatch.setenv("SILICONFLOW_API_KEY", "fake-siliconflow")
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setitem(sys.modules, "ollama", None)
+        cfg = auto_select_judge("siliconflow")
+        assert cfg.provider == "siliconflow"
+        assert cfg.same_source is True
+
+    def test_writer_siliconflow_only_deepseek_key_picks_deepseek_cross(
+        self, monkeypatch
+    ):
+        """Writer=siliconflow + 仅 DEEPSEEK key 可用 → fallback 链选 deepseek（异源），
+        硬化 fallback 顺序契约（review S2 follow-up）。"""
+        import sys
+
+        monkeypatch.setenv("SILICONFLOW_API_KEY", "fake-siliconflow")
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "fake-deepseek")
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setitem(sys.modules, "ollama", None)
+        cfg = auto_select_judge("siliconflow")
+        assert cfg.provider == "deepseek"
+        assert cfg.model == "deepseek-chat"
+        assert cfg.same_source is False
+
+
 class TestProviderKeyAvailable:
     """``_provider_key_available`` 直接单测：ollama 模块缺失不应被认为可用。
 
@@ -196,7 +257,7 @@ class TestAutoSelectJudgeOllamaFallback:
     """回归冒烟 bug：ollama 模块缺失时不该被 fallback 选中。"""
 
     def test_ollama_module_missing_falls_back_to_same_source(self, monkeypatch):
-        """Writer=deepseek，无 Gemini/OpenAI key，ollama 模块未装 →
+        """Writer=deepseek，无 Gemini/OpenAI/SiliconFlow key，ollama 模块未装 →
         fallback 链跳过 ollama，退化为同源 deepseek。
         """
         import sys
@@ -204,6 +265,7 @@ class TestAutoSelectJudgeOllamaFallback:
         monkeypatch.setenv("DEEPSEEK_API_KEY", "fake-deepseek")
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
         monkeypatch.setitem(sys.modules, "ollama", None)
         cfg = auto_select_judge("deepseek")
         assert cfg.provider == "deepseek"

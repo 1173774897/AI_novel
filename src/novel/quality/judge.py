@@ -59,6 +59,7 @@ _WRITER_TO_JUDGE_PROVIDER: dict[str, tuple[str, str]] = {
     "gemini": ("deepseek", "deepseek-chat"),
     "openai": ("gemini", "gemini-2.5-flash"),
     "ollama": ("gemini", "gemini-2.5-flash"),
+    "siliconflow": ("gemini", "gemini-2.5-flash"),
 }
 
 # Provider → 环境变量名，用于检查 API key 是否可用
@@ -66,6 +67,7 @@ _PROVIDER_ENV_KEY: dict[str, str] = {
     "gemini": "GEMINI_API_KEY",
     "deepseek": "DEEPSEEK_API_KEY",
     "openai": "OPENAI_API_KEY",
+    "siliconflow": "SILICONFLOW_API_KEY",
     "ollama": "OLLAMA_HOST",  # ollama 本地服务，不严格要求 env
 }
 
@@ -73,6 +75,8 @@ _PROVIDER_DEFAULT_MODEL: dict[str, str] = {
     "gemini": "gemini-2.5-flash",
     "deepseek": "deepseek-chat",
     "openai": "gpt-4o-mini",
+    # SiliconFlow 默认 GLM-4.6（旗舰，支持 json_mode）。GLM-4.5-Air / GLM-4.5V 不支持 json_mode 不能当 judge。
+    "siliconflow": "zai-org/GLM-4.6",
     "ollama": "qwen2:7b",
 }
 
@@ -125,8 +129,9 @@ def auto_select_judge(writer_provider: str) -> JudgeConfig:
             same_source=False,
         )
 
-    # 回退：按 gemini → deepseek → openai → ollama 顺序找一个异源且 key 可用的
-    for candidate in ("gemini", "deepseek", "openai", "ollama"):
+    # 回退：按 gemini → deepseek → openai → siliconflow → ollama 顺序找一个异源且 key 可用的
+    # siliconflow 排在 openai 之后、ollama 之前：云服务比本地 ollama 稳定，但 OpenAI / Gemini 优先级仍最高
+    for candidate in ("gemini", "deepseek", "openai", "siliconflow", "ollama"):
         if candidate == key:
             continue
         if _provider_key_available(candidate):

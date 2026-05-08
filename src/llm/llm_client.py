@@ -58,6 +58,10 @@ def _detect_provider() -> tuple[str, dict]:
         log.info("自动检测 LLM: 使用 deepseek provider")
         return "deepseek", {}
 
+    if os.environ.get("SILICONFLOW_API_KEY"):
+        log.info("自动检测 LLM: 使用 siliconflow provider")
+        return "siliconflow", {}
+
     if os.environ.get("OPENAI_API_KEY"):
         log.info("自动检测 LLM: 使用 openai provider")
         return "openai", {}
@@ -76,7 +80,7 @@ def _detect_provider() -> tuple[str, dict]:
 
     raise RuntimeError(
         "未找到可用的 LLM provider。请设置以下环境变量之一: "
-        "GEMINI_API_KEY, DEEPSEEK_API_KEY, OPENAI_API_KEY，"
+        "GEMINI_API_KEY, DEEPSEEK_API_KEY, SILICONFLOW_API_KEY, OPENAI_API_KEY，"
         "或启动本地 Ollama 服务。"
     )
 
@@ -86,7 +90,7 @@ def create_llm_client(config: dict | None = None) -> LLMClient:
 
     Args:
         config: LLM 配置字典，可包含 provider, model, api_key 等字段。
-                provider 支持: auto, openai, deepseek, gemini, ollama。
+                provider 支持: auto, openai, deepseek, gemini, ollama, siliconflow。
 
     Returns:
         对应后端的 LLMClient 实例。
@@ -134,6 +138,22 @@ def _create_for_provider(provider: str, config: dict) -> "LLMClient":
         }
         # 用户配置覆盖默认值，但过滤 None 值
         merged = {**deepseek_defaults}
+        for k, v in config.items():
+            if v is not None:
+                merged[k] = v
+        return OpenAIBackend(merged)
+
+    if provider == "siliconflow":
+        # SiliconFlow 提供 OpenAI 兼容协议，复用 OpenAIBackend + 自定义 base_url。
+        # 默认模型 GLM-4.6（旗舰，支持 json_mode；GLM-4.5-Air / GLM-4.5V 不支持 json_mode）。
+        from src.llm.openai_backend import OpenAIBackend
+
+        siliconflow_defaults = {
+            "base_url": "https://api.siliconflow.cn/v1",
+            "api_key_env": "SILICONFLOW_API_KEY",
+            "model": "zai-org/GLM-4.6",
+        }
+        merged = {**siliconflow_defaults}
         for k, v in config.items():
             if v is not None:
                 merged[k] = v

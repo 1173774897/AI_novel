@@ -87,6 +87,67 @@ class TestParseArgs:
         assert args.judge_model == "deepseek"
 
 
+class TestAutoSelectJudgeFromEnv:
+    """``auto_select_judge_from_env`` 推断 writer provider + 选 judge 的端到端覆盖。
+
+    Why: SiliconFlow 接入后，detect chain 增加了 SILICONFLOW_API_KEY 分支，
+    需保证 priority 与 ``llm_client._detect_provider`` 一致。
+    """
+
+    def test_detect_priority_gemini_outranks_siliconflow(
+        self, script, monkeypatch
+    ) -> None:
+        """GEMINI 与 SILICONFLOW key 同时存在 → writer=gemini（detect 优先级高），
+        preferred judge=deepseek，但 deepseek 无 key → fallback 链选 siliconflow（异源）。
+        覆盖 detect 优先级与 fallback 顺序的契约。"""
+        import sys
+
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setenv("SILICONFLOW_API_KEY", "fake-sf")
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-gem")
+        monkeypatch.setitem(sys.modules, "ollama", None)
+        cfg = script.auto_select_judge_from_env()
+        # writer=gemini → preferred=deepseek（无 key）→ fallback 选 siliconflow
+        # （fallback 顺序: gemini[skip 同 writer] → deepseek[无 key] → openai[无 key] → siliconflow[有 key]）
+        assert cfg.provider == "siliconflow"
+        assert cfg.model == "zai-org/GLM-4.6"
+        assert cfg.same_source is False
+
+    def test_only_siliconflow_key_no_cross_falls_back_to_same_source(
+        self, script, monkeypatch
+    ) -> None:
+        """只有 SILICONFLOW key（无其他异源 + ollama 模块缺失）→ 同源 GLM judge。"""
+        import sys
+
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.setenv("SILICONFLOW_API_KEY", "fake-sf")
+        monkeypatch.setitem(sys.modules, "ollama", None)
+        cfg = script.auto_select_judge_from_env()
+        assert cfg.provider == "siliconflow"
+        assert cfg.model == "zai-org/GLM-4.6"
+        assert cfg.same_source is True
+
+    def test_deepseek_writer_with_siliconflow_judge(
+        self, script, monkeypatch
+    ) -> None:
+        """DEEPSEEK 当 writer + 仅 SILICONFLOW key（无 gemini/openai）→
+        异源 judge=siliconflow（GLM-4.6）。"""
+        import sys
+
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "fake-ds")
+        monkeypatch.setenv("SILICONFLOW_API_KEY", "fake-sf")
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setitem(sys.modules, "ollama", None)
+        cfg = script.auto_select_judge_from_env()
+        assert cfg.provider == "siliconflow"
+        assert cfg.model == "zai-org/GLM-4.6"
+        assert cfg.same_source is False
+
+
 class TestResolveGenres:
     def test_two_genres(self, script) -> None:
         out = script.resolve_genres("xuanhuan,wuxia")
