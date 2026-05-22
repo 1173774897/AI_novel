@@ -123,6 +123,7 @@ class TestAutoSelectJudgeFromEnv:
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
         monkeypatch.setenv("SILICONFLOW_API_KEY", "fake-sf")
         monkeypatch.setitem(sys.modules, "ollama", None)
         cfg = script.auto_select_judge_from_env()
@@ -141,11 +142,83 @@ class TestAutoSelectJudgeFromEnv:
         monkeypatch.setenv("SILICONFLOW_API_KEY", "fake-sf")
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
         monkeypatch.setitem(sys.modules, "ollama", None)
         cfg = script.auto_select_judge_from_env()
         assert cfg.provider == "siliconflow"
         assert cfg.model == "zai-org/GLM-4.6"
         assert cfg.same_source is False
+
+    def test_deepseek_writer_with_kimi_judge(
+        self, script, monkeypatch
+    ) -> None:
+        """DEEPSEEK 当 writer + 仅 MOONSHOT key（无 gemini/openai/sf）→
+        异源 judge=kimi（moonshot-v1-auto）。覆盖 Kimi 接入 fallback。"""
+        import sys
+
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "fake-ds")
+        monkeypatch.setenv("MOONSHOT_API_KEY", "fake-moonshot")
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
+        monkeypatch.setitem(sys.modules, "ollama", None)
+        cfg = script.auto_select_judge_from_env()
+        assert cfg.provider == "kimi"
+        assert cfg.model == "moonshot-v1-auto"
+        assert cfg.same_source is False
+
+    def test_only_moonshot_key_writer_inferred_kimi(
+        self, script, monkeypatch
+    ) -> None:
+        """只有 MOONSHOT key → writer 推断为 kimi（接入对齐 _detect_provider）；
+        无其他异源 → 同源警告。"""
+        import sys
+
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
+        monkeypatch.setenv("MOONSHOT_API_KEY", "fake-moonshot")
+        monkeypatch.setitem(sys.modules, "ollama", None)
+        cfg = script.auto_select_judge_from_env()
+        assert cfg.provider == "kimi"
+        assert cfg.same_source is True
+
+    def test_kimi_k2_6_override_raises_temperature_lock_error(
+        self, script, monkeypatch
+    ) -> None:
+        """显式 --judge-model kimi-k2.6 → 早期 guard raise ValueError 避免后期崩。
+
+        Why: kimi-k2.6 API 锁 temperature=1.0；judge 默认 temp=0.1，调用会被
+        Moonshot 拒绝。若不在 auto_select_judge_from_env 入口处 guard，会在
+        生成完 N 章后才在 judge 阶段崩，浪费 token。
+        """
+        import sys
+
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "fake-ds")
+        monkeypatch.setenv("MOONSHOT_API_KEY", "fake-moonshot")
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
+        monkeypatch.setitem(sys.modules, "ollama", None)
+        with pytest.raises(ValueError, match="kimi-k2.6.*temperature"):
+            script.auto_select_judge_from_env("kimi-k2.6")
+
+    def test_kimi_v1_auto_override_passes_guard(
+        self, script, monkeypatch
+    ) -> None:
+        """显式 --judge-model moonshot-v1-32k → guard 放行（无 k2 in name）。"""
+        import sys
+
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "fake-ds")
+        monkeypatch.setenv("MOONSHOT_API_KEY", "fake-moonshot")
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
+        monkeypatch.setitem(sys.modules, "ollama", None)
+        cfg = script.auto_select_judge_from_env("moonshot-v1-32k")
+        assert cfg.provider == "kimi"
+        assert cfg.model == "moonshot-v1-32k"
 
 
 class TestResolveGenres:

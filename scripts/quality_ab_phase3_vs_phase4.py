@@ -852,8 +852,12 @@ def main(
                 writer_provider = "deepseek"
             elif os.environ.get("GEMINI_API_KEY"):
                 writer_provider = "gemini"
+            elif os.environ.get("SILICONFLOW_API_KEY"):
+                writer_provider = "siliconflow"
             elif os.environ.get("OPENAI_API_KEY"):
                 writer_provider = "openai"
+            elif os.environ.get("MOONSHOT_API_KEY"):
+                writer_provider = "kimi"
             judge_config = auto_select_judge(writer_provider)
             if args.judge_model:
                 judge_config.model = args.judge_model

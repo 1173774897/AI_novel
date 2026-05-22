@@ -191,6 +191,7 @@ class TestAutoSelectJudgeSiliconFlow:
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
         monkeypatch.setitem(sys.modules, "ollama", None)
         cfg = auto_select_judge("siliconflow")
         assert cfg.provider == "siliconflow"
@@ -257,7 +258,7 @@ class TestAutoSelectJudgeOllamaFallback:
     """回归冒烟 bug：ollama 模块缺失时不该被 fallback 选中。"""
 
     def test_ollama_module_missing_falls_back_to_same_source(self, monkeypatch):
-        """Writer=deepseek，无 Gemini/OpenAI/SiliconFlow key，ollama 模块未装 →
+        """Writer=deepseek，无 Gemini/OpenAI/SiliconFlow/Kimi key，ollama 模块未装 →
         fallback 链跳过 ollama，退化为同源 deepseek。
         """
         import sys
@@ -266,10 +267,111 @@ class TestAutoSelectJudgeOllamaFallback:
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
+        monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
         monkeypatch.setitem(sys.modules, "ollama", None)
         cfg = auto_select_judge("deepseek")
         assert cfg.provider == "deepseek"
         assert cfg.same_source is True
+
+
+class TestAutoSelectJudgeKimi:
+    """Kimi (Moonshot) provider 接入回归。
+
+    Why: 用户场景 — DEEPSEEK_API_KEY 写作 + 仅 MOONSHOT_API_KEY 可用，
+    fallback 链应选 Kimi（异源 moonshot-v1-auto judge），不应退化同源。
+    Kimi 排在 siliconflow 之后、ollama 之前；若 SF key 也存在，应优先 SF。
+    """
+
+    def test_writer_deepseek_only_kimi_key_picks_kimi(self, monkeypatch):
+        import sys
+
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "fake-deepseek")
+        monkeypatch.setenv("MOONSHOT_API_KEY", "fake-moonshot")
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
+        monkeypatch.setitem(sys.modules, "ollama", None)
+        cfg = auto_select_judge("deepseek")
+        assert cfg.provider == "kimi"
+        assert cfg.model == "moonshot-v1-auto"
+        assert cfg.same_source is False
+
+    def test_writer_kimi_maps_to_gemini_preferred(self, monkeypatch):
+        """Writer=kimi，preferred 是 gemini；gemini key 存在时走 preferred 路径。"""
+        monkeypatch.setenv("MOONSHOT_API_KEY", "fake-moonshot")
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-gemini")
+        cfg = auto_select_judge("kimi")
+        assert cfg.provider == "gemini"
+        assert cfg.model == "gemini-2.5-flash"
+        assert cfg.same_source is False
+
+    def test_writer_kimi_no_cross_falls_back_to_same_source(self, monkeypatch):
+        """Writer=kimi + 无任何其他 key + ollama 模块缺失 → 退化同源。"""
+        import sys
+
+        monkeypatch.setenv("MOONSHOT_API_KEY", "fake-moonshot")
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
+        monkeypatch.setitem(sys.modules, "ollama", None)
+        cfg = auto_select_judge("kimi")
+        assert cfg.provider == "kimi"
+        assert cfg.model == "moonshot-v1-auto"
+        assert cfg.same_source is True
+
+    def test_writer_kimi_only_deepseek_key_picks_deepseek_cross(self, monkeypatch):
+        """Writer=kimi + 仅 DEEPSEEK key → fallback 链选 deepseek（异源），
+        硬化 fallback 顺序契约。"""
+        import sys
+
+        monkeypatch.setenv("MOONSHOT_API_KEY", "fake-moonshot")
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "fake-deepseek")
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
+        monkeypatch.setitem(sys.modules, "ollama", None)
+        cfg = auto_select_judge("kimi")
+        assert cfg.provider == "deepseek"
+        assert cfg.model == "deepseek-chat"
+        assert cfg.same_source is False
+
+    def test_siliconflow_outranks_kimi_in_fallback(self, monkeypatch):
+        """SF 和 Kimi 同时可用时，writer=deepseek → 选 SF（fallback 顺序契约）。
+
+        Why: fallback 顺序 (gemini, deepseek, openai, siliconflow, kimi, ollama)，
+        SF 排 kimi 之前。若顺序在未来调整，此测试会先红，提示更新文档。
+        """
+        import sys
+
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "fake-deepseek")
+        monkeypatch.setenv("SILICONFLOW_API_KEY", "fake-siliconflow")
+        monkeypatch.setenv("MOONSHOT_API_KEY", "fake-moonshot")
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setitem(sys.modules, "ollama", None)
+        cfg = auto_select_judge("deepseek")
+        assert cfg.provider == "siliconflow"
+
+
+class TestProviderKeyAvailableKimi:
+    """``_provider_key_available("kimi")`` 行为：env-based，与 SF 同。"""
+
+    def test_kimi_available_when_env_set(self, monkeypatch):
+        monkeypatch.setenv("MOONSHOT_API_KEY", "fake-moonshot")
+        assert _provider_key_available("kimi") is True
+
+    def test_kimi_unavailable_when_env_empty(self, monkeypatch):
+        monkeypatch.setenv("MOONSHOT_API_KEY", "")
+        assert _provider_key_available("kimi") is False
+
+    def test_kimi_unavailable_when_env_whitespace(self, monkeypatch):
+        monkeypatch.setenv("MOONSHOT_API_KEY", "   ")
+        assert _provider_key_available("kimi") is False
+
+    def test_kimi_unavailable_when_env_missing(self, monkeypatch):
+        monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
+        assert _provider_key_available("kimi") is False
 
 
 # ---------------------------------------------------------------------------

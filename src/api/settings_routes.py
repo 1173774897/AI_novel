@@ -49,6 +49,7 @@ _KEY_ENV_NAMES = {
     "DEEPSEEK_API_KEY",
     "GEMINI_API_KEY",
     "SILICONFLOW_API_KEY",
+    "MOONSHOT_API_KEY",
     "DASHSCOPE_API_KEY",
     "TOGETHER_API_KEY",
     "KLING_API_KEY",
@@ -182,6 +183,20 @@ def test_key(req: TestKeyRequest):
                 return {"status": "ok", "message": "SiliconFlow key is valid"}
             else:
                 return {"status": "error", "message": f"SiliconFlow returned status {r.status_code}"}
+
+        elif provider == "kimi":
+            import httpx
+            r = httpx.get(
+                "https://api.moonshot.cn/v1/models",
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=10.0,
+            )
+            if r.status_code == 200:
+                return {"status": "ok", "message": "Kimi (Moonshot) key is valid"}
+            elif r.status_code == 401:
+                return {"status": "error", "message": "Invalid API key (401 Unauthorized)"}
+            else:
+                return {"status": "error", "message": f"Kimi returned status {r.status_code}"}
 
         else:
             return {"status": "unknown", "message": f"No test implemented for provider: {provider}"}

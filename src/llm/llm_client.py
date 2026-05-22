@@ -66,6 +66,10 @@ def _detect_provider() -> tuple[str, dict]:
         log.info("自动检测 LLM: 使用 openai provider")
         return "openai", {}
 
+    if os.environ.get("MOONSHOT_API_KEY"):
+        log.info("自动检测 LLM: 使用 kimi provider")
+        return "kimi", {}
+
     # 检测本地 Ollama（使用 stdlib 避免额外依赖）
     try:
         import urllib.request
@@ -80,7 +84,7 @@ def _detect_provider() -> tuple[str, dict]:
 
     raise RuntimeError(
         "未找到可用的 LLM provider。请设置以下环境变量之一: "
-        "GEMINI_API_KEY, DEEPSEEK_API_KEY, SILICONFLOW_API_KEY, OPENAI_API_KEY，"
+        "GEMINI_API_KEY, DEEPSEEK_API_KEY, SILICONFLOW_API_KEY, OPENAI_API_KEY, MOONSHOT_API_KEY，"
         "或启动本地 Ollama 服务。"
     )
 
@@ -90,7 +94,7 @@ def create_llm_client(config: dict | None = None) -> LLMClient:
 
     Args:
         config: LLM 配置字典，可包含 provider, model, api_key 等字段。
-                provider 支持: auto, openai, deepseek, gemini, ollama, siliconflow。
+                provider 支持: auto, openai, deepseek, gemini, ollama, siliconflow, kimi。
 
     Returns:
         对应后端的 LLMClient 实例。
@@ -154,6 +158,23 @@ def _create_for_provider(provider: str, config: dict) -> "LLMClient":
             "model": "zai-org/GLM-4.6",
         }
         merged = {**siliconflow_defaults}
+        for k, v in config.items():
+            if v is not None:
+                merged[k] = v
+        return OpenAIBackend(merged)
+
+    if provider == "kimi":
+        # Moonshot (Kimi) 提供 OpenAI 兼容协议，复用 OpenAIBackend + 自定义 base_url。
+        # 默认 moonshot-v1-auto：自动路由 8k/32k/128k 上下文，支持 json_mode + 任意 temperature，judge 友好。
+        # kimi-k2.6 是旗舰但 temperature 锁 1.0，不能当 judge；用户需要时可显式 override model。
+        from src.llm.openai_backend import OpenAIBackend
+
+        kimi_defaults = {
+            "base_url": "https://api.moonshot.cn/v1",
+            "api_key_env": "MOONSHOT_API_KEY",
+            "model": "moonshot-v1-auto",
+        }
+        merged = {**kimi_defaults}
         for k, v in config.items():
             if v is not None:
                 merged[k] = v

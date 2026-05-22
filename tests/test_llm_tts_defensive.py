@@ -954,3 +954,83 @@ class TestCreateLLMClient:
 
         assert isinstance(client, OpenAIBackend)
         assert client._base_url == "https://api.siliconflow.cn/v1"
+
+    def test_kimi_provider_creates_openai_backend(self):
+        """Kimi provider should reuse OpenAIBackend with moonshot base_url."""
+        from src.llm.llm_client import create_llm_client
+        from src.llm.openai_backend import OpenAIBackend
+
+        with patch.dict("os.environ", {"MOONSHOT_API_KEY": "fake-moonshot"}):
+            client = create_llm_client({"provider": "kimi"})
+
+        assert isinstance(client, OpenAIBackend)
+        assert client._base_url == "https://api.moonshot.cn/v1"
+        assert client._api_key_env == "MOONSHOT_API_KEY"
+        # 默认 moonshot-v1-auto（自动路由 + json_mode + 任意 temperature）
+        assert client._model == "moonshot-v1-auto"
+
+    def test_kimi_user_can_override_model(self):
+        """User-supplied model should override Kimi default (e.g. kimi-k2.6 旗舰)."""
+        from src.llm.llm_client import create_llm_client
+        from src.llm.openai_backend import OpenAIBackend
+
+        with patch.dict("os.environ", {"MOONSHOT_API_KEY": "fake-moonshot"}):
+            client = create_llm_client(
+                {"provider": "kimi", "model": "kimi-k2.6"}
+            )
+
+        assert isinstance(client, OpenAIBackend)
+        assert client._model == "kimi-k2.6"
+        assert client._base_url == "https://api.moonshot.cn/v1"
+
+    def test_kimi_missing_api_key_raises(self):
+        """Kimi provider without MOONSHOT_API_KEY should raise RuntimeError.
+
+        Why patch _detect_provider: dev 机如果跑了 ollama，create_llm_client
+        在 provider 缺 key 时会 fallback auto-detect，命中本地 ollama 后返回
+        OllamaBackend → 测试假阳性。patch 阻断 fallback 链使 contract 测试稳定。
+        """
+        from src.llm.llm_client import create_llm_client
+
+        with patch.dict("os.environ", {}, clear=True), patch(
+            "src.llm.llm_client._detect_provider",
+            side_effect=RuntimeError("no provider available"),
+        ):
+            with pytest.raises(RuntimeError, match="未找到 API Key"):
+                create_llm_client({"provider": "kimi"})
+
+    def test_auto_detect_picks_kimi_when_only_key(self):
+        """Auto-detect with only MOONSHOT_API_KEY should pick kimi (Ollama 探活在 kimi 之后)."""
+        from src.llm.llm_client import create_llm_client
+        from src.llm.openai_backend import OpenAIBackend
+
+        with patch.dict(
+            "os.environ", {"MOONSHOT_API_KEY": "fake-moonshot"}, clear=True
+        ):
+            client = create_llm_client({"provider": "auto"})
+
+        assert isinstance(client, OpenAIBackend)
+        assert client._base_url == "https://api.moonshot.cn/v1"
+        assert client._model == "moonshot-v1-auto"
+
+    def test_auto_detect_prefers_siliconflow_over_kimi(self):
+        """SF 和 Kimi 同时设了 → auto 检测顺序优先选 SF（kimi 排在 OpenAI 之后/Ollama 之前）。
+
+        Why: 维护 _detect_provider 优先级契约。SF 接入早，已成事实标准；Kimi
+        作为后加 provider 不应突然抢占老用户的 auto 路径。
+        """
+        from src.llm.llm_client import create_llm_client
+        from src.llm.openai_backend import OpenAIBackend
+
+        with patch.dict(
+            "os.environ",
+            {
+                "SILICONFLOW_API_KEY": "fake-sf",
+                "MOONSHOT_API_KEY": "fake-moonshot",
+            },
+            clear=True,
+        ):
+            client = create_llm_client({"provider": "auto"})
+
+        assert isinstance(client, OpenAIBackend)
+        assert client._base_url == "https://api.siliconflow.cn/v1"

@@ -226,10 +226,24 @@ def auto_select_judge_from_env(override_model: str = "") -> "Any":
         writer_provider = "siliconflow"
     elif os.environ.get("OPENAI_API_KEY"):
         writer_provider = "openai"
+    elif os.environ.get("MOONSHOT_API_KEY"):
+        writer_provider = "kimi"
 
     config: JudgeConfig = auto_select_judge(writer_provider)
     if override_model:
         config.model = override_model
+    # Moonshot k2.x 旗舰锁 temperature=1.0；judge 默认 temp=0.1 会被 API 拒绝
+    # 早期 guard 避免在生成完 N 章后才崩，浪费 token。
+    if (
+        config.provider == "kimi"
+        and "k2" in config.model.lower()
+        and config.temperature < 0.9
+    ):
+        raise ValueError(
+            f"Kimi {config.model} 锁 temperature=1.0，不能当 judge "
+            f"(当前 temperature={config.temperature})。"
+            f"请改用 moonshot-v1-auto / moonshot-v1-8k / -32k / -128k。"
+        )
     if config.same_source:
         log.warning(
             "=" * 68
