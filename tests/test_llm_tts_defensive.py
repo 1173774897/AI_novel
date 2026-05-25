@@ -1034,3 +1034,82 @@ class TestCreateLLMClient:
 
         assert isinstance(client, OpenAIBackend)
         assert client._base_url == "https://api.siliconflow.cn/v1"
+
+    def test_zhipu_provider_creates_openai_backend(self):
+        """ZhipuAI provider should reuse OpenAIBackend with bigmodel base_url."""
+        from src.llm.llm_client import create_llm_client
+        from src.llm.openai_backend import OpenAIBackend
+
+        with patch.dict("os.environ", {"ZHIPU_API_KEY": "fake-zhipu"}):
+            client = create_llm_client({"provider": "zhipu"})
+
+        assert isinstance(client, OpenAIBackend)
+        assert client._base_url == "https://open.bigmodel.cn/api/paas/v4"
+        assert client._api_key_env == "ZHIPU_API_KEY"
+        # 默认 glm-4.6（旗舰，支持 json_mode + 任意 temperature）
+        assert client._model == "glm-4.6"
+
+    def test_zhipu_user_can_override_model(self):
+        """User-supplied model should override Zhipu default (e.g. glm-5 / glm-4.7)."""
+        from src.llm.llm_client import create_llm_client
+        from src.llm.openai_backend import OpenAIBackend
+
+        with patch.dict("os.environ", {"ZHIPU_API_KEY": "fake-zhipu"}):
+            client = create_llm_client(
+                {"provider": "zhipu", "model": "glm-5"}
+            )
+
+        assert isinstance(client, OpenAIBackend)
+        assert client._model == "glm-5"
+        assert client._base_url == "https://open.bigmodel.cn/api/paas/v4"
+
+    def test_zhipu_missing_api_key_raises(self):
+        """ZhipuAI provider without ZHIPU_API_KEY should raise RuntimeError.
+
+        Why patch _detect_provider: 同 kimi 测试 — 阻断 fallback 链使 contract 测试稳定。
+        """
+        from src.llm.llm_client import create_llm_client
+
+        with patch.dict("os.environ", {}, clear=True), patch(
+            "src.llm.llm_client._detect_provider",
+            side_effect=RuntimeError("no provider available"),
+        ):
+            with pytest.raises(RuntimeError, match="未找到 API Key"):
+                create_llm_client({"provider": "zhipu"})
+
+    def test_auto_detect_picks_zhipu_when_only_key(self):
+        """Auto-detect with only ZHIPU_API_KEY should pick zhipu (Ollama 探活在 zhipu 之后)."""
+        from src.llm.llm_client import create_llm_client
+        from src.llm.openai_backend import OpenAIBackend
+
+        with patch.dict(
+            "os.environ", {"ZHIPU_API_KEY": "fake-zhipu"}, clear=True
+        ):
+            client = create_llm_client({"provider": "auto"})
+
+        assert isinstance(client, OpenAIBackend)
+        assert client._base_url == "https://open.bigmodel.cn/api/paas/v4"
+        assert client._model == "glm-4.6"
+
+    def test_auto_detect_prefers_kimi_over_zhipu(self):
+        """Kimi 和 Zhipu 同时设了 → auto 优先 Kimi（zhipu 排在 kimi 之后/Ollama 之前）。
+
+        Why: 维护 _detect_provider 优先级契约。Kimi 接入早于 Zhipu，已成既有路径；
+        Zhipu 作为后加 provider 不应突然抢占用户 auto 路径。同时 Kimi 默认 moonshot-v1-auto
+        路由 8k 上下文比 Zhipu glm-4.6 更便宜。
+        """
+        from src.llm.llm_client import create_llm_client
+        from src.llm.openai_backend import OpenAIBackend
+
+        with patch.dict(
+            "os.environ",
+            {
+                "MOONSHOT_API_KEY": "fake-moonshot",
+                "ZHIPU_API_KEY": "fake-zhipu",
+            },
+            clear=True,
+        ):
+            client = create_llm_client({"provider": "auto"})
+
+        assert isinstance(client, OpenAIBackend)
+        assert client._base_url == "https://api.moonshot.cn/v1"

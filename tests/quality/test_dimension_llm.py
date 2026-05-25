@@ -192,6 +192,7 @@ class TestAutoSelectJudgeSiliconFlow:
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
+        monkeypatch.delenv("ZHIPU_API_KEY", raising=False)
         monkeypatch.setitem(sys.modules, "ollama", None)
         cfg = auto_select_judge("siliconflow")
         assert cfg.provider == "siliconflow"
@@ -258,7 +259,7 @@ class TestAutoSelectJudgeOllamaFallback:
     """回归冒烟 bug：ollama 模块缺失时不该被 fallback 选中。"""
 
     def test_ollama_module_missing_falls_back_to_same_source(self, monkeypatch):
-        """Writer=deepseek，无 Gemini/OpenAI/SiliconFlow/Kimi key，ollama 模块未装 →
+        """Writer=deepseek，无 Gemini/OpenAI/SiliconFlow/Kimi/Zhipu key，ollama 模块未装 →
         fallback 链跳过 ollama，退化为同源 deepseek。
         """
         import sys
@@ -268,6 +269,7 @@ class TestAutoSelectJudgeOllamaFallback:
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
         monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
+        monkeypatch.delenv("ZHIPU_API_KEY", raising=False)
         monkeypatch.setitem(sys.modules, "ollama", None)
         cfg = auto_select_judge("deepseek")
         assert cfg.provider == "deepseek"
@@ -314,6 +316,7 @@ class TestAutoSelectJudgeKimi:
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
+        monkeypatch.delenv("ZHIPU_API_KEY", raising=False)
         monkeypatch.setitem(sys.modules, "ollama", None)
         cfg = auto_select_judge("kimi")
         assert cfg.provider == "kimi"
@@ -372,6 +375,112 @@ class TestProviderKeyAvailableKimi:
     def test_kimi_unavailable_when_env_missing(self, monkeypatch):
         monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
         assert _provider_key_available("kimi") is False
+
+
+class TestAutoSelectJudgeZhipu:
+    """ZhipuAI (BigModel) provider 接入回归。
+
+    Why: 用户场景 — DEEPSEEK_API_KEY 写作 + 仅 ZHIPU_API_KEY 可用，
+    fallback 链应选 Zhipu（异源 glm-4.6 judge），不应退化同源。
+    Zhipu 排在 kimi 之后、ollama 之前；若 kimi key 也存在，应优先 kimi
+    （维护既有 provider 优先级契约 + Kimi moonshot-v1-auto 更便宜）。
+    """
+
+    def test_writer_deepseek_only_zhipu_key_picks_zhipu(self, monkeypatch):
+        import sys
+
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "fake-deepseek")
+        monkeypatch.setenv("ZHIPU_API_KEY", "fake-zhipu")
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
+        monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
+        monkeypatch.setitem(sys.modules, "ollama", None)
+        cfg = auto_select_judge("deepseek")
+        assert cfg.provider == "zhipu"
+        assert cfg.model == "glm-4.6"
+        assert cfg.same_source is False
+
+    def test_writer_zhipu_maps_to_gemini_preferred(self, monkeypatch):
+        """Writer=zhipu，preferred 是 gemini；gemini key 存在时走 preferred 路径。"""
+        monkeypatch.setenv("ZHIPU_API_KEY", "fake-zhipu")
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-gemini")
+        cfg = auto_select_judge("zhipu")
+        assert cfg.provider == "gemini"
+        assert cfg.model == "gemini-2.5-flash"
+        assert cfg.same_source is False
+
+    def test_writer_zhipu_no_cross_falls_back_to_same_source(self, monkeypatch):
+        """Writer=zhipu + 无任何其他 key + ollama 模块缺失 → 退化同源。"""
+        import sys
+
+        monkeypatch.setenv("ZHIPU_API_KEY", "fake-zhipu")
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
+        monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
+        monkeypatch.setitem(sys.modules, "ollama", None)
+        cfg = auto_select_judge("zhipu")
+        assert cfg.provider == "zhipu"
+        assert cfg.model == "glm-4.6"
+        assert cfg.same_source is True
+
+    def test_writer_zhipu_only_deepseek_key_picks_deepseek_cross(self, monkeypatch):
+        """Writer=zhipu + 仅 DEEPSEEK key → fallback 链选 deepseek（异源），
+        硬化 fallback 顺序契约。"""
+        import sys
+
+        monkeypatch.setenv("ZHIPU_API_KEY", "fake-zhipu")
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "fake-deepseek")
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
+        monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
+        monkeypatch.setitem(sys.modules, "ollama", None)
+        cfg = auto_select_judge("zhipu")
+        assert cfg.provider == "deepseek"
+        assert cfg.model == "deepseek-chat"
+        assert cfg.same_source is False
+
+    def test_kimi_outranks_zhipu_in_fallback(self, monkeypatch):
+        """Kimi 和 Zhipu 同时可用时，writer=deepseek → 选 Kimi（fallback 顺序契约）。
+
+        Why: fallback 顺序 (gemini, deepseek, openai, siliconflow, kimi, zhipu, ollama)，
+        Kimi 排 Zhipu 之前。若顺序在未来调整，此测试会先红，提示更新文档。
+        """
+        import sys
+
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "fake-deepseek")
+        monkeypatch.setenv("MOONSHOT_API_KEY", "fake-moonshot")
+        monkeypatch.setenv("ZHIPU_API_KEY", "fake-zhipu")
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
+        monkeypatch.setitem(sys.modules, "ollama", None)
+        cfg = auto_select_judge("deepseek")
+        assert cfg.provider == "kimi"
+        assert cfg.model == "moonshot-v1-auto"
+
+
+class TestProviderKeyAvailableZhipu:
+    """``_provider_key_available("zhipu")`` 行为：env-based，与 SF/Kimi 同。"""
+
+    def test_zhipu_available_when_env_set(self, monkeypatch):
+        monkeypatch.setenv("ZHIPU_API_KEY", "fake-zhipu")
+        assert _provider_key_available("zhipu") is True
+
+    def test_zhipu_unavailable_when_env_empty(self, monkeypatch):
+        monkeypatch.setenv("ZHIPU_API_KEY", "")
+        assert _provider_key_available("zhipu") is False
+
+    def test_zhipu_unavailable_when_env_whitespace(self, monkeypatch):
+        monkeypatch.setenv("ZHIPU_API_KEY", "   ")
+        assert _provider_key_available("zhipu") is False
+
+    def test_zhipu_unavailable_when_env_missing(self, monkeypatch):
+        monkeypatch.delenv("ZHIPU_API_KEY", raising=False)
+        assert _provider_key_available("zhipu") is False
 
 
 # ---------------------------------------------------------------------------

@@ -61,6 +61,7 @@ _WRITER_TO_JUDGE_PROVIDER: dict[str, tuple[str, str]] = {
     "ollama": ("gemini", "gemini-2.5-flash"),
     "siliconflow": ("gemini", "gemini-2.5-flash"),
     "kimi": ("gemini", "gemini-2.5-flash"),
+    "zhipu": ("gemini", "gemini-2.5-flash"),
 }
 
 # Provider → 环境变量名，用于检查 API key 是否可用
@@ -70,6 +71,7 @@ _PROVIDER_ENV_KEY: dict[str, str] = {
     "openai": "OPENAI_API_KEY",
     "siliconflow": "SILICONFLOW_API_KEY",
     "kimi": "MOONSHOT_API_KEY",
+    "zhipu": "ZHIPU_API_KEY",
     "ollama": "OLLAMA_HOST",  # ollama 本地服务，不严格要求 env
 }
 
@@ -82,6 +84,12 @@ _PROVIDER_DEFAULT_MODEL: dict[str, str] = {
     # Kimi 默认 moonshot-v1-auto（自动路由 8k/32k/128k，支持 json_mode + 低温度）。
     # kimi-k2.6 旗舰锁 temperature=1.0 不能当 judge，故不作默认。
     "kimi": "moonshot-v1-auto",
+    # ZhipuAI 官方直连，默认 glm-4.6（对照 SF 中转版）。
+    # 已 curl 探活 glm-4.6: chat / temperature=0.1 / json_mode / response_format 全部 work。
+    # 智谱列出的其他 model（glm-4.5-air / glm-4.7 / glm-5 / glm-5.1 等）未探活 —
+    # 显式 --judge-model 前请先 curl 验证 json_mode + low temperature，避免 SF GLM-4.5-Air
+    # 那种 "兼容 chat 但不兼容 json_mode" 踩坑（详见 [[siliconflow-glm-judge-done]] 规则 13）。
+    "zhipu": "glm-4.6",
     "ollama": "qwen2:7b",
 }
 
@@ -134,9 +142,10 @@ def auto_select_judge(writer_provider: str) -> JudgeConfig:
             same_source=False,
         )
 
-    # 回退：按 gemini → deepseek → openai → siliconflow → kimi → ollama 顺序找一个异源且 key 可用的
-    # 云服务（siliconflow / kimi）排在 openai 之后、ollama 之前：云服务比本地 ollama 稳定，但 OpenAI / Gemini 优先级仍最高
-    for candidate in ("gemini", "deepseek", "openai", "siliconflow", "kimi", "ollama"):
+    # 回退：按 gemini → deepseek → openai → siliconflow → kimi → zhipu → ollama 顺序找一个异源且 key 可用的
+    # 云服务（siliconflow / kimi / zhipu）排在 openai 之后、ollama 之前：云服务比本地 ollama 稳定，但 OpenAI / Gemini 优先级仍最高
+    # zhipu 排在 kimi 之后是因为 kimi moonshot-v1-auto 默认 8k 路由更便宜，zhipu glm-4.6 上下文有 200K 但更贵
+    for candidate in ("gemini", "deepseek", "openai", "siliconflow", "kimi", "zhipu", "ollama"):
         if candidate == key:
             continue
         if _provider_key_available(candidate):

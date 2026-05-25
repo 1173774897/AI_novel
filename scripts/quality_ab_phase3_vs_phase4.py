@@ -858,6 +858,8 @@ def main(
                 writer_provider = "openai"
             elif os.environ.get("MOONSHOT_API_KEY"):
                 writer_provider = "kimi"
+            elif os.environ.get("ZHIPU_API_KEY"):
+                writer_provider = "zhipu"
             judge_config = auto_select_judge(writer_provider)
             if args.judge_model:
                 judge_config.model = args.judge_model

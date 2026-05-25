@@ -70,6 +70,10 @@ def _detect_provider() -> tuple[str, dict]:
         log.info("自动检测 LLM: 使用 kimi provider")
         return "kimi", {}
 
+    if os.environ.get("ZHIPU_API_KEY"):
+        log.info("自动检测 LLM: 使用 zhipu provider")
+        return "zhipu", {}
+
     # 检测本地 Ollama（使用 stdlib 避免额外依赖）
     try:
         import urllib.request
@@ -84,7 +88,7 @@ def _detect_provider() -> tuple[str, dict]:
 
     raise RuntimeError(
         "未找到可用的 LLM provider。请设置以下环境变量之一: "
-        "GEMINI_API_KEY, DEEPSEEK_API_KEY, SILICONFLOW_API_KEY, OPENAI_API_KEY, MOONSHOT_API_KEY，"
+        "GEMINI_API_KEY, DEEPSEEK_API_KEY, SILICONFLOW_API_KEY, OPENAI_API_KEY, MOONSHOT_API_KEY, ZHIPU_API_KEY，"
         "或启动本地 Ollama 服务。"
     )
 
@@ -94,7 +98,7 @@ def create_llm_client(config: dict | None = None) -> LLMClient:
 
     Args:
         config: LLM 配置字典，可包含 provider, model, api_key 等字段。
-                provider 支持: auto, openai, deepseek, gemini, ollama, siliconflow, kimi。
+                provider 支持: auto, openai, deepseek, gemini, ollama, siliconflow, kimi, zhipu。
 
     Returns:
         对应后端的 LLMClient 实例。
@@ -175,6 +179,25 @@ def _create_for_provider(provider: str, config: dict) -> "LLMClient":
             "model": "moonshot-v1-auto",
         }
         merged = {**kimi_defaults}
+        for k, v in config.items():
+            if v is not None:
+                merged[k] = v
+        return OpenAIBackend(merged)
+
+    if provider == "zhipu":
+        # 智谱 ZhipuAI / BigModel 提供 OpenAI 兼容协议，复用 OpenAIBackend + 自定义 base_url。
+        # 默认 glm-4.6：已 curl 探活 chat / temperature=0.1 / json_mode / response_format 全 work。
+        # 智谱官方直连，对照 SiliconFlow 中转的 zai-org/GLM-4.6（推理引擎可能不同）。
+        # 其他 model（glm-4.5-air / glm-4.7 / glm-5 / glm-5.1）智谱平台已上线但未探活；
+        # 显式 --judge-model override 前请先 curl 验证 json_mode + 低温度兼容（规则 13）。
+        from src.llm.openai_backend import OpenAIBackend
+
+        zhipu_defaults = {
+            "base_url": "https://open.bigmodel.cn/api/paas/v4",
+            "api_key_env": "ZHIPU_API_KEY",
+            "model": "glm-4.6",
+        }
+        merged = {**zhipu_defaults}
         for k, v in config.items():
             if v is not None:
                 merged[k] = v

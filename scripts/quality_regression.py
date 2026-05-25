@@ -228,6 +228,8 @@ def auto_select_judge_from_env(override_model: str = "") -> "Any":
         writer_provider = "openai"
     elif os.environ.get("MOONSHOT_API_KEY"):
         writer_provider = "kimi"
+    elif os.environ.get("ZHIPU_API_KEY"):
+        writer_provider = "zhipu"
 
     config: JudgeConfig = auto_select_judge(writer_provider)
     if override_model:

@@ -124,6 +124,7 @@ class TestAutoSelectJudgeFromEnv:
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
+        monkeypatch.delenv("ZHIPU_API_KEY", raising=False)
         monkeypatch.setenv("SILICONFLOW_API_KEY", "fake-sf")
         monkeypatch.setitem(sys.modules, "ollama", None)
         cfg = script.auto_select_judge_from_env()
@@ -143,6 +144,7 @@ class TestAutoSelectJudgeFromEnv:
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
+        monkeypatch.delenv("ZHIPU_API_KEY", raising=False)
         monkeypatch.setitem(sys.modules, "ollama", None)
         cfg = script.auto_select_judge_from_env()
         assert cfg.provider == "siliconflow"
@@ -161,6 +163,7 @@ class TestAutoSelectJudgeFromEnv:
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
+        monkeypatch.delenv("ZHIPU_API_KEY", raising=False)
         monkeypatch.setitem(sys.modules, "ollama", None)
         cfg = script.auto_select_judge_from_env()
         assert cfg.provider == "kimi"
@@ -178,6 +181,7 @@ class TestAutoSelectJudgeFromEnv:
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
+        monkeypatch.delenv("ZHIPU_API_KEY", raising=False)
         monkeypatch.setenv("MOONSHOT_API_KEY", "fake-moonshot")
         monkeypatch.setitem(sys.modules, "ollama", None)
         cfg = script.auto_select_judge_from_env()
@@ -200,6 +204,7 @@ class TestAutoSelectJudgeFromEnv:
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
+        monkeypatch.delenv("ZHIPU_API_KEY", raising=False)
         monkeypatch.setitem(sys.modules, "ollama", None)
         with pytest.raises(ValueError, match="kimi-k2.6.*temperature"):
             script.auto_select_judge_from_env("kimi-k2.6")
@@ -215,10 +220,65 @@ class TestAutoSelectJudgeFromEnv:
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
+        monkeypatch.delenv("ZHIPU_API_KEY", raising=False)
         monkeypatch.setitem(sys.modules, "ollama", None)
         cfg = script.auto_select_judge_from_env("moonshot-v1-32k")
         assert cfg.provider == "kimi"
         assert cfg.model == "moonshot-v1-32k"
+
+    def test_deepseek_writer_with_zhipu_judge(
+        self, script, monkeypatch
+    ) -> None:
+        """DEEPSEEK 当 writer + 仅 ZHIPU key（无 gemini/openai/sf/kimi）→
+        异源 judge=zhipu（glm-4.6）。覆盖 Zhipu 接入 fallback。"""
+        import sys
+
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "fake-ds")
+        monkeypatch.setenv("ZHIPU_API_KEY", "fake-zhipu")
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
+        monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
+        monkeypatch.setitem(sys.modules, "ollama", None)
+        cfg = script.auto_select_judge_from_env()
+        assert cfg.provider == "zhipu"
+        assert cfg.model == "glm-4.6"
+        assert cfg.same_source is False
+
+    def test_only_zhipu_key_writer_inferred_zhipu(
+        self, script, monkeypatch
+    ) -> None:
+        """只有 ZHIPU key → writer 推断为 zhipu（接入对齐 _detect_provider）；
+        无其他异源 → 同源警告。"""
+        import sys
+
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
+        monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
+        monkeypatch.setenv("ZHIPU_API_KEY", "fake-zhipu")
+        monkeypatch.setitem(sys.modules, "ollama", None)
+        cfg = script.auto_select_judge_from_env()
+        assert cfg.provider == "zhipu"
+        assert cfg.same_source is True
+
+    def test_zhipu_glm5_override_passes(
+        self, script, monkeypatch
+    ) -> None:
+        """显式 --judge-model glm-5 → 透传给 JudgeConfig.model（无 k2 guard 阻拦）。"""
+        import sys
+
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "fake-ds")
+        monkeypatch.setenv("ZHIPU_API_KEY", "fake-zhipu")
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
+        monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
+        monkeypatch.setitem(sys.modules, "ollama", None)
+        cfg = script.auto_select_judge_from_env("glm-5")
+        assert cfg.provider == "zhipu"
+        assert cfg.model == "glm-5"
 
 
 class TestResolveGenres:
