@@ -208,6 +208,9 @@ export default function SettingsPage() {
   >("unknown");
   const [taskCount, setTaskCount] = useState<number | null>(null);
 
+  // Gate persistence until localStorage has been loaded (prevents wipe on mount)
+  const [hydrated, setHydrated] = useState(false);
+
   // Load settings from localStorage
   useEffect(() => {
     const saved = loadSettings();
@@ -221,9 +224,10 @@ export default function SettingsPage() {
     if (saved._imageBackend) setImageBackend(saved._imageBackend);
     if (saved._videoBackend) setVideoBackend(saved._videoBackend);
     if (saved._workers) setWorkers(parseInt(saved._workers, 10) || 1);
+    setHydrated(true);
   }, []);
 
-  // Save keys whenever they change (debounced via effect)
+  // Save keys whenever they change (only after initial load)
   const persistSettings = useCallback(() => {
     const toSave: Record<string, string> = {
       _llmProvider: llmProvider,
@@ -238,8 +242,9 @@ export default function SettingsPage() {
   }, [keys, llmProvider, imageBackend, videoBackend, workers]);
 
   useEffect(() => {
+    if (!hydrated) return;
     persistSettings();
-  }, [persistSettings]);
+  }, [hydrated, persistSettings]);
 
   const handleKeyChange = (name: string, value: string) => {
     setKeys((prev) => ({ ...prev, [name]: value }));

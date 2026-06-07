@@ -45,6 +45,14 @@ const IMAGE_BACKEND_OPTIONS = [
   { value: "dashscope", label: "阿里云通义" },
 ] as const;
 
+const IMAGE_BACKEND_DEFAULTS: Record<
+  string,
+  { model: string; size?: string }
+> = {
+  siliconflow: { model: "black-forest-labs/FLUX.1-schnell" },
+  dashscope: { model: "qwen-image-2.0-pro-2026-04-22", size: "928*1664" },
+};
+
 const LLM_OPTIONS = [
   { value: "auto", label: "自动检测" },
   { value: "gemini", label: "Gemini" },
@@ -204,7 +212,10 @@ export default function VideoCreatePage() {
     const config: Record<string, unknown> = {
       promptgen: { style },
       tts: { voice, rate },
-      imagegen: { backend: imageBackend },
+      imagegen: {
+        backend: imageBackend,
+        ...(IMAGE_BACKEND_DEFAULTS[imageBackend] ?? {}),
+      },
       llm: { provider: llm },
       video: {
         codec,

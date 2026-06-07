@@ -320,6 +320,26 @@ test.describe("Settings Page", () => {
     expect(stored._llmProvider).toBe("gemini");
   });
 
+  test("should keep API key in input after page reload", async ({ page }) => {
+    await page.goto("/settings");
+
+    const siliconRow = page.getByText("SiliconFlow API Key").locator("..").locator("..");
+    const siliconInput = siliconRow.locator('input[type="password"]');
+    await siliconInput.fill("sk-siliconflow-test-key");
+
+    await page.waitForTimeout(500);
+
+    await page.reload();
+
+    const siliconRowAfterReload = page
+      .getByText("SiliconFlow API Key")
+      .locator("..")
+      .locator("..");
+    await siliconRowAfterReload.locator('button', { hasText: "显示" }).click();
+    const visibleInput = siliconRowAfterReload.locator('input[type="text"]');
+    await expect(visibleInput).toHaveValue("sk-siliconflow-test-key");
+  });
+
   test("should restore settings from localStorage on page load", async ({ page }) => {
     // Pre-populate localStorage
     await page.goto("/settings");

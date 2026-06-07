@@ -30,6 +30,39 @@ class ArtDirectorAgent:
             self._video_gen = VideoGenTool(self.config)
         return self._video_gen
 
+    def _run_image_gen_with_moderation_fallback(
+        self,
+        prompt: str,
+        out_path: Path,
+        index: int,
+        decisions: list[Decision],
+    ) -> None:
+        """生图；遇云端内容审核则软化 prompt 后重试，避免整流水线失败。"""
+        from src.imagegen.dashscope_backend import ContentModerationError
+        from src.imagegen.moderation import soften_image_prompt
+
+        current = prompt
+        for mod_attempt in range(3):
+            try:
+                self.image_gen.run(current, out_path)
+                if mod_attempt > 0:
+                    decisions.append(make_decision(
+                        "ArtDirector",
+                        f"moderation_fallback_seg{index}",
+                        f"段{index} 内容审核拦截，已用安全 prompt 生成",
+                        f"attempt={mod_attempt}, prompt: {current[:80]}...",
+                    ))
+                return
+            except ContentModerationError:
+                if mod_attempt >= 2:
+                    raise
+                current = soften_image_prompt(prompt, mod_attempt)
+                log.warning(
+                    "[ArtDirector] 段%d 内容审核拦截，改用安全 prompt (尝试 %d)",
+                    index,
+                    mod_attempt + 1,
+                )
+
     def _optimize_prompt(
         self,
         original_prompt: str,
@@ -99,10 +132,12 @@ class ArtDirectorAgent:
                     prompt[:100],
                 )
 
-            # 生成图片
+            # 生成图片（内容审核拦截时自动软化 prompt 重试）
             suffix = f"_r{retry_count}" if retry_count > 0 else ""
             out_path = img_dir / f"{index:04d}{suffix}.png"
-            self.image_gen.run(prompt, out_path)
+            self._run_image_gen_with_moderation_fallback(
+                prompt, out_path, index, decisions
+            )
 
             if not quality_enabled:
                 decisions.append(make_decision(

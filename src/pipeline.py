@@ -273,7 +273,11 @@ class Pipeline:
             log.info("[断点续传] 跳过 TTS")
             return self._load_audio_srt()
 
-        log.info("阶段 4/5: 语音合成 + 字幕")
+        subtitles_enabled = self.cfg.get("subtitle", {}).get("enabled", True)
+        log.info(
+            "阶段 4/5: 语音合成%s",
+            " + 字幕" if subtitles_enabled else "（无字幕）",
+        )
         tts = TTSEngine(self.cfg["tts"])
         sub_gen = SubtitleGenerator()
         results = []
@@ -284,13 +288,18 @@ class Pipeline:
                 audio_path = self.audio_dir / f"{i:04d}.mp3"
                 srt_path = self.srt_dir / f"{i:04d}.srt"
 
-                if self.resume and audio_path.exists() and srt_path.exists():
+                if self.resume and audio_path.exists() and (
+                    not subtitles_enabled or srt_path.exists()
+                ):
                     results.append({"audio": audio_path, "srt": srt_path})
                     progress.advance(task)
                     continue
 
                 audio, word_boundaries = tts.synthesize(seg["text"], audio_path)
-                sub_gen.generate_srt(word_boundaries, seg["text"], srt_path)
+                if subtitles_enabled:
+                    sub_gen.generate_srt(word_boundaries, seg["text"], srt_path)
+                else:
+                    srt_path.write_text("", encoding="utf-8")
                 results.append({"audio": audio, "srt": srt_path})
                 self.ckpt.update_segment(i, "audio", str(audio_path), save=False)
                 self.ckpt.update_segment(i, "srt", str(srt_path))

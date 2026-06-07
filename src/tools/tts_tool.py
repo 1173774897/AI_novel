@@ -47,5 +47,12 @@ class TTSTool:
             engine = TTSEngine(tts_cfg)
 
         audio, word_boundaries = engine.synthesize(text, audio_path)
-        self._get_sub_gen().generate_srt(word_boundaries, text, srt_path)
+
+        subtitle_cfg = self.config.get("subtitle", {})
+        if subtitle_cfg.get("enabled", True):
+            self._get_sub_gen().generate_srt(word_boundaries, text, srt_path)
+        else:
+            srt_path.parent.mkdir(parents=True, exist_ok=True)
+            srt_path.write_text("", encoding="utf-8")
+
         return audio_path, srt_path

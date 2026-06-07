@@ -93,6 +93,51 @@ def _detect_provider() -> tuple[str, dict]:
     )
 
 
+_PROVIDER_DEFAULT_MODEL: dict[str, str] = {
+    "openai": "gpt-4o-mini",
+    "deepseek": "deepseek-chat",
+    "siliconflow": "zai-org/GLM-4.6",
+    "kimi": "moonshot-v1-auto",
+    "zhipu": "glm-4.6",
+    "gemini": "gemini-2.0-flash-lite",
+    "ollama": "qwen2.5:7b",
+}
+
+_PROVIDER_MODEL_PREFIXES: dict[str, tuple[str, ...]] = {
+    "openai": ("gpt-", "o1", "o3", "o4", "chatgpt-"),
+    "deepseek": ("deepseek",),
+    "siliconflow": ("zai-org/", "deepseek", "Qwen/", "meta-llama/", "THUDM/"),
+    "kimi": ("moonshot", "kimi"),
+    "zhipu": ("glm-",),
+    "gemini": ("gemini",),
+    "ollama": (),  # 本地模型名多样，不做前缀校验
+}
+
+
+def _resolve_llm_model(provider: str, config: dict) -> dict:
+    """provider 确定后校正 model，避免 DeepSeek 端点收到 gpt-4o-mini 等跨厂商模型名。"""
+    if provider not in _PROVIDER_DEFAULT_MODEL:
+        return dict(config)
+
+    resolved = dict(config)
+    model = resolved.get("model", "")
+    prefixes = _PROVIDER_MODEL_PREFIXES.get(provider, ())
+    default = _PROVIDER_DEFAULT_MODEL[provider]
+
+    if model and prefixes and not any(model.startswith(p) for p in prefixes):
+        log.warning(
+            "llm.model=%r 与 provider=%r 不匹配，改用 %r",
+            model,
+            provider,
+            default,
+        )
+        resolved["model"] = default
+    elif not model:
+        resolved["model"] = default
+
+    return resolved
+
+
 def create_llm_client(config: dict | None = None) -> LLMClient:
     """根据配置创建 LLM 客户端。
 
@@ -110,6 +155,8 @@ def create_llm_client(config: dict | None = None) -> LLMClient:
     if provider == "auto":
         provider, extra = _detect_provider()
         config = {**config, **extra}
+
+    config = _resolve_llm_model(provider, config)
 
     try:
         return _create_for_provider(provider, config)

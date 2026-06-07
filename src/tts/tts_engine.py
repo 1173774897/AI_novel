@@ -1,12 +1,15 @@
 """TTS 引擎 - 基于 edge-tts 的语音合成"""
 
 import asyncio
+import time
 from pathlib import Path
 
 from src.logger import log
 
 # 单段文本最大字符数，超过此长度会分块合成后拼接
 _MAX_CHUNK_CHARS = 5000
+_TTS_MAX_RETRIES = 5
+_TTS_RETRY_BASE_DELAY = 3
 
 
 class TTSEngine:
@@ -51,33 +54,49 @@ class TTSEngine:
             log.warning("TTS 收到空文本，生成静音占位文件")
             return self._generate_silent_placeholder(output_path)
 
-        # edge_tts 是纯异步库，在同步上下文中用 asyncio.run 驱动
-        # 若已在事件循环中（如 FastAPI），则用线程池规避 asyncio.run 限制
-        try:
+        last_exc: Exception | None = None
+        for attempt in range(_TTS_MAX_RETRIES):
             try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-
-            if loop and loop.is_running():
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                    future = pool.submit(
-                        asyncio.run, self._synthesize_async(text, output_path)
-                    )
-                    audio_path, boundaries = future.result()
-            else:
-                audio_path, boundaries = asyncio.run(
-                    self._synthesize_async(text, output_path)
+                audio_path, boundaries = self._run_synthesize(text, output_path)
+                log.debug(
+                    "TTS 完成: %s (词边界 %d 条)", output_path.name, len(boundaries)
                 )
-        except Exception as exc:
-            log.error("TTS 合成失败: %s", exc)
-            raise
+                return audio_path, boundaries
+            except Exception as exc:
+                last_exc = exc
+                if attempt >= _TTS_MAX_RETRIES - 1:
+                    break
+                delay = _TTS_RETRY_BASE_DELAY * (2 ** attempt)
+                log.warning(
+                    "TTS 合成失败，%ds 后重试 (%d/%d): %s",
+                    delay,
+                    attempt + 1,
+                    _TTS_MAX_RETRIES,
+                    exc,
+                )
+                time.sleep(delay)
 
-        log.debug(
-            "TTS 完成: %s (词边界 %d 条)", output_path.name, len(boundaries)
-        )
-        return audio_path, boundaries
+        log.error("TTS 合成失败: %s", last_exc)
+        raise last_exc  # type: ignore[misc]
+
+    def _run_synthesize(
+        self, text: str, output_path: Path
+    ) -> tuple[Path, list[dict]]:
+        """执行一次 edge-tts 合成（无重试）。"""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(
+                    asyncio.run, self._synthesize_async(text, output_path)
+                )
+                return future.result()
+        return asyncio.run(self._synthesize_async(text, output_path))
 
     # ------------------------------------------------------------------
     # Async internals

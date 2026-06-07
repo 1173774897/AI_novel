@@ -3,7 +3,7 @@
 # 全局 LLM 配置（分段和 Prompt 生成共用，可被模块级配置覆盖）
 llm:
   provider: deepseek  # auto | openai | deepseek | gemini | ollama
-  model: deepseek-chat  # DeepSeek V3
+  model: deepseek-v4-flash   # 或 deepseek-v4-pro
   # model: gpt-4o-mini          # openai 便宜
   # model: deepseek-chat         # deepseek 默认
   # model: gemini-2.0-flash-lite # gemini 默认
@@ -20,14 +20,14 @@ segmenter:
   max_chars: 100
   min_chars: 20
   llm:
-    model: gpt-4o-mini
+    model: deepseek-chat  # 与顶层 llm.provider 保持一致
     temperature: 0.3
 
 # Prompt 生成
 promptgen:
   style: anime  # 风格预设名
   llm:
-    model: gpt-4o-mini
+    model: deepseek-chat  # 与顶层 llm.provider 保持一致
     temperature: 0.7
   character_tracking: true
 
@@ -55,26 +55,19 @@ promptgen:
 
 # 图片生成
 imagegen:
-  backend: siliconflow  # diffusers | together | siliconflow | dashscope
-  model: black-forest-labs/FLUX.1-schnell
+  backend: dashscope  # diffusers | together | siliconflow | dashscope
+  model: qwen-image
+  size: "928*1664"   # 9:16 竖屏（qwen-image 推荐）
+  request_interval: 5  # 每张图间隔秒数，避免 429 限流；仍频繁 429 可调到 8-10
+  prompt_extend: false  # 敏感题材务必 false，扩写易触发内容审核
+  negative_prompt: "nsfw, nude, violence, gore, blood, explicit sexual content"
   width: 1024
   height: 1792
-  # --- Diffusers 本地 (backend: diffusers) ---
-  # model: gsdf/Counterfeit-V2.5
-  # width: 512
-  # height: 896
-  # steps: 30
-  # guidance_scale: 7.5
-  # device: auto  # auto | cuda | mps | cpu
-  # --- Together.ai (backend: together) ---
-  # model: black-forest-labs/FLUX.1-schnell-Free
-  # steps: 4
-  # --- SiliconFlow 硅基流动 (backend: siliconflow) ---
-  # model: black-forest-labs/FLUX.1-schnell  # 免费
-  # image_size: 1024x1792  # 可选，默认用 width x height
-  # --- 阿里云万相 (backend: dashscope) ---
-  # model: wan2.6-t2i  # 新用户 100 张免费
-  # size: 1024*1792
+  # --- 其他后端（切换时改 backend）---
+  # siliconflow: model: black-forest-labs/FLUX.1-schnell
+  # wan2.6-t2i:  size: 960*1696
+  # diffusers:   model: gsdf/Counterfeit-V2.5, device: auto
+  # together:    model: black-forest-labs/FLUX.1-schnell-Free
 
 # TTS 配音
 tts:
@@ -84,6 +77,7 @@ tts:
 
 # 字幕
 subtitle:
+  enabled: false   # false = 不生成 SRT、成片不烧字幕（仅保留配音）
   font_size: 48
   font_color: white
   outline_color: black

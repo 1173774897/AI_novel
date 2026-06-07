@@ -82,6 +82,7 @@ def voice_director_node(state: AgentState) -> dict:
     segments = state["segments"]
     audio_files: list[str] = []
     srt_files: list[str] = []
+    subtitles_enabled = config.get("subtitle", {}).get("enabled", True)
 
     audio_dir = workspace / "audio"
     srt_dir = workspace / "subtitles"
@@ -89,6 +90,18 @@ def voice_director_node(state: AgentState) -> dict:
     srt_dir.mkdir(parents=True, exist_ok=True)
 
     for i, seg in enumerate(segments):
+        audio_path = audio_dir / f"{i:04d}.mp3"
+        srt_path = srt_dir / f"{i:04d}.srt"
+
+        # 断点续跑：音频已存在则跳过（关闭字幕时不强制要求 srt）
+        if audio_path.exists() and audio_path.stat().st_size > 100 and (
+            not subtitles_enabled or srt_path.exists()
+        ):
+            audio_files.append(str(audio_path))
+            srt_files.append(str(srt_path))
+            log.info("[VoiceDirector] 段 %d/%d 跳过（已有音频）", i + 1, len(segments))
+            continue
+
         emotion = agent.analyze_emotion(seg["text"])
         params = agent.get_tts_params(emotion)
 
@@ -98,9 +111,6 @@ def voice_director_node(state: AgentState) -> dict:
             f"情感={emotion}, rate={params['rate']}, volume={params['volume']}",
             f"文本: {seg['text'][:50]}...",
         ))
-
-        audio_path = audio_dir / f"{i:04d}.mp3"
-        srt_path = srt_dir / f"{i:04d}.srt"
 
         tts_tool.run(
             seg["text"],
@@ -112,6 +122,7 @@ def voice_director_node(state: AgentState) -> dict:
 
         audio_files.append(str(audio_path))
         srt_files.append(str(srt_path))
+        log.info("[VoiceDirector] 段 %d/%d TTS 完成", i + 1, len(segments))
 
     log.info("[VoiceDirector] TTS 完成: %d 段音频", len(audio_files))
 
