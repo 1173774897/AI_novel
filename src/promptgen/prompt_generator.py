@@ -263,6 +263,12 @@ class PromptGenerator:
         self._era_cache = self._detect_era(full_text)
         log.info("检测到文本时代: %s", self._era_cache)
 
+    def seed_characters(self, characters: list[dict]) -> int:
+        """用 ContentAnalyzer 等外部角色表预填 CharacterTracker。"""
+        if not self._tracker or not characters:
+            return 0
+        return self._tracker.seed_characters(characters)
+
     def generate(self, text: str, segment_index: int) -> str:
         """将小说文本片段转换为 SD 图片 prompt。"""
         if not text or not text.strip():

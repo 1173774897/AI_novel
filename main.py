@@ -58,6 +58,35 @@ def run(input_file: str, config: str | None, output: str | None,
         raise click.Abort()
 
 
+@cli.command("preview")
+@click.argument("workspace_dir", type=click.Path(exists=True))
+@click.option("--count", "-n", default=2, show_default=True,
+              help="预览前 N 个分镜")
+@click.option("--config", "-c", type=click.Path(), default=None, help="配置文件路径")
+@click.option("--output", "-o", type=click.Path(), default=None,
+              help="输出 MP4 路径（默认 output/<项目名>_preview_N.mp4）")
+def preview(workspace_dir: str, count: int, config: str | None, output: str | None):
+    """仅合成前 N 个分镜，快速预览字幕/特效（不跑完整 Agent 流水线）"""
+    from src.config_manager import load_config
+    from src.preview_video import preview_workspace
+
+    if count < 1:
+        raise click.BadParameter("count 必须 >= 1")
+
+    try:
+        cfg = load_config(Path(config) if config else None)
+        result = preview_workspace(
+            workspace=Path(workspace_dir),
+            config=cfg,
+            count=count,
+            output_path=Path(output) if output else None,
+        )
+        console.print(f"\n[bold green]预览视频已生成: {result}[/]")
+    except Exception as e:
+        log.error("预览合成失败: %s", e)
+        raise click.Abort()
+
+
 @cli.command()
 @click.argument("input_file", type=click.Path(exists=True))
 @click.option("--config", "-c", type=click.Path(), default=None, help="配置文件路径")

@@ -21,6 +21,12 @@ class PromptGenTool:
             self._gen = PromptGenerator(prompt_cfg)
         return self._gen
 
+    def seed_characters(self, characters: list[dict]) -> int:
+        """将 ContentAnalyzer 角色描述注入 CharacterTracker。"""
+        if not characters:
+            return 0
+        return self._get_gen().seed_characters(characters)
+
     def run(
         self,
         text: str,

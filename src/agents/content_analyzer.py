@@ -28,6 +28,42 @@ GENRE_RULES = [
     (r"皇上|朕|太后|将军|丫鬟|府邸", "历史", "古代"),
 ]
 
+_CHARACTER_EXTRACT_PROMPT = """\
+你是小说角色视觉设定专家。分析以下文本，提取主要角色（最多5个）。
+
+对每个角色，desc 必须是一段完整的中文外观描述（80-150字），必须明确包含：
+1. 年龄（如"约35岁"；文本未写明时根据身份合理推断）
+2. 性别（男/女；根据称呼、代词、身份推断，不能含糊）
+3. 身材体型（如高挑纤细、魁梧壮实、微胖敦实等）
+4. 样貌特征（脸型、眉眼、表情气质、肤色等，可合理补充）
+5. 发型发色
+6. 服装穿着（符合时代与场景）
+7. 1-2个标志性细节（如伤疤、眼镜、职业配饰等；无则按身份合理假设）
+
+规则：
+- 文本已写明的特征必须保留，不可与原文矛盾
+- 文本未写明的部分可合理假设，假设需符合角色身份、时代背景与故事氛围
+- desc 用连贯中文描述，不要用 JSON 或分点列表
+- 只提取在文中有实际戏份的角色
+
+文本：
+{text}
+
+输出 JSON 数组：[{{"name": "姓名", "desc": "完整外观描述"}}]"""
+
+_CHARACTER_ENRICH_PROMPT = """\
+你是小说角色视觉设定专家。以下为已从文本识别出的角色名，请结合文本为每个角色撰写详细外观描述。
+
+每个 desc 必须是一段完整中文（80-150字），明确包含：年龄、性别、身材体型、样貌特征、发型发色、服装穿着、标志性细节。
+文本未写明的可合理假设，但不可与原文矛盾。desc 用连贯中文描述，不要用分点列表。
+
+文本：
+{text}
+
+角色：{names}
+
+输出 JSON 数组：[{{"name": "姓名", "desc": "完整外观描述"}}]，姓名必须与输入一致。"""
+
 
 class ContentAnalyzerAgent:
     def __init__(self, config: dict, budget_mode: bool = False):
@@ -82,26 +118,74 @@ class ContentAnalyzerAgent:
             return self._extract_characters_by_rules(text)
         return self._extract_characters_by_llm(text)
 
-    def _extract_characters_by_rules(self, text: str) -> list[dict]:
-        # 使用非贪婪匹配，确保提取人名而非"人名+动词"
-        matches = re.findall(
-            r"([\u4e00-\u9fa5]{2,4}?)(?:说道|问道|笑道|喊道|道|说)", text[:3000]
-        )
-        names = list(dict.fromkeys(matches))[:5]
-        return [{"name": n, "desc": ""} for n in names]
+    @staticmethod
+    def _normalize_characters(data: list | None) -> list[dict]:
+        """清洗 LLM 返回的角色列表，保留 name/desc 字段。"""
+        if not data:
+            return []
+        normalized: list[dict] = []
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name", "")).strip()
+            desc = str(entry.get("desc", "")).strip()
+            if not name:
+                continue
+            normalized.append({"name": name, "desc": desc})
+        return normalized[:5]
 
-    def _extract_characters_by_llm(self, text: str) -> list[dict]:
-        prompt = (
-            "分析以下小说片段，提取主要角色（最多5个）。\n\n"
-            f"文本：\n{text[:2000]}\n\n"
-            '输出 JSON 数组：[{{"name": "姓名", "desc": "外貌/服装/特征简述"}}]'
+    def _enrich_character_descriptions(
+        self, text: str, characters: list[dict]
+    ) -> list[dict]:
+        """为仅有名字、缺少 desc 的角色补全详细外观描述。"""
+        if not characters:
+            return characters
+
+        names = [c["name"] for c in characters if c.get("name")]
+        if not names:
+            return characters
+
+        prompt = _CHARACTER_ENRICH_PROMPT.format(
+            text=text[:3000],
+            names="、".join(names),
         )
         try:
             result = self._get_llm().chat(
                 messages=[{"role": "user", "content": prompt}],
                 json_mode=True,
             )
-            data = extract_json_array(result.content)
+            enriched = self._normalize_characters(extract_json_array(result.content))
+            if not enriched:
+                return characters
+
+            desc_by_name = {c["name"]: c["desc"] for c in enriched if c.get("desc")}
+            merged: list[dict] = []
+            for char in characters:
+                name = char["name"]
+                desc = desc_by_name.get(name) or char.get("desc", "")
+                merged.append({"name": name, "desc": desc})
+            return merged
+        except Exception as e:
+            log.warning("LLM 角色描述补全失败 (%s)，保留已有结果", e)
+            return characters
+
+    def _extract_characters_by_rules(self, text: str) -> list[dict]:
+        # 使用非贪婪匹配，确保提取人名而非"人名+动词"
+        matches = re.findall(
+            r"([\u4e00-\u9fa5]{2,4}?)(?:说道|问道|笑道|喊道|道|说)", text[:3000]
+        )
+        names = list(dict.fromkeys(matches))[:5]
+        characters = [{"name": n, "desc": ""} for n in names]
+        return self._enrich_character_descriptions(text, characters)
+
+    def _extract_characters_by_llm(self, text: str) -> list[dict]:
+        prompt = _CHARACTER_EXTRACT_PROMPT.format(text=text[:3000])
+        try:
+            result = self._get_llm().chat(
+                messages=[{"role": "user", "content": prompt}],
+                json_mode=True,
+            )
+            data = self._normalize_characters(extract_json_array(result.content))
             if data:
                 return data
         except Exception as e:
@@ -110,6 +194,18 @@ class ContentAnalyzerAgent:
 
     def suggest_style(self, genre: str, era: str) -> str:
         return STYLE_MAP.get((genre, era), "anime")
+
+
+def _log_character_descriptions(characters: list[dict], source: str = "ContentAnalyzer") -> None:
+    """将角色外观描述打印到日志，便于核对一致性预填内容。"""
+    for entry in characters:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name", "")).strip()
+        desc = str(entry.get("desc", "")).strip()
+        if not name or not desc:
+            continue
+        log.info("[%s] 角色 %s: %s", source, name, desc)
 
 
 def content_analyzer_node(state: AgentState) -> dict:
@@ -140,6 +236,7 @@ def content_analyzer_node(state: AgentState) -> dict:
 
     # 3. 角色提取
     characters = agent.extract_characters(state["full_text"])
+    _log_character_descriptions(characters)
     decisions.append(make_decision(
         "ContentAnalyzer", "extract_characters",
         f"提取 {len(characters)} 个角色",

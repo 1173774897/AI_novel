@@ -10,6 +10,19 @@ from src.tools.image_gen_tool import ImageGenTool
 from src.tools.evaluate_quality_tool import EvaluateQualityTool
 from src.logger import log
 
+_MIN_IMAGE_BYTES = 100
+
+
+def _existing_image_path(img_dir: Path, index: int) -> Path | None:
+    """若该段图片已存在则返回路径，供断点续传跳过生图。"""
+    primary = img_dir / f"{index:04d}.png"
+    if primary.exists() and primary.stat().st_size > _MIN_IMAGE_BYTES:
+        return primary
+    for path in sorted(img_dir.glob(f"{index:04d}_r*.png"), reverse=True):
+        if path.stat().st_size > _MIN_IMAGE_BYTES:
+            return path
+    return None
+
 
 class ArtDirectorAgent:
     MAX_RETRIES = 3
@@ -251,9 +264,33 @@ def art_director_node(state: AgentState) -> dict:
         f"风格={state.get('suggested_style', 'default')}",
     ))
 
+    characters = state.get("characters") or []
+    if characters:
+        seeded = agent.prompt_gen.seed_characters(characters)
+        if seeded:
+            decisions.append(make_decision(
+                "ArtDirector", "seed_characters",
+                f"预填 {seeded} 个角色外观描述",
+                f"来源=ContentAnalyzer, 角色={[c.get('name') for c in characters if c.get('desc')]}",
+            ))
+            log.info("[ArtDirector] 从 ContentAnalyzer 预填 %d 个角色描述", seeded)
+
     full_text = state.get("full_text")
+    img_dir = Path(workspace) / "images"
+    img_dir.mkdir(parents=True, exist_ok=True)
 
     for i, seg in enumerate(segments):
+        existing = _existing_image_path(img_dir, i)
+        if existing is not None:
+            images.append(str(existing))
+            quality_scores.append(-1.0)
+            log.info(
+                "[ArtDirector] 段 %d/%d 跳过（已有图片）",
+                i + 1,
+                len(segments),
+            )
+            continue
+
         path, score, retries, seg_decisions = agent.generate_image(
             seg["text"], i, Path(workspace), full_text=full_text
         )

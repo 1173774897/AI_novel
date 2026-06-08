@@ -20,7 +20,11 @@ class VideoAssembleTool:
     ) -> Path:
         from src.video.video_assembler import VideoAssembler
 
-        assembler = VideoAssembler(self.config["video"], workspace)
+        assembler = VideoAssembler(
+            self.config["video"],
+            workspace,
+            subtitle_config=self.config.get("subtitle"),
+        )
         assembler.assemble(
             images=images,
             audio_srt=audio_srt,

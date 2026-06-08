@@ -177,6 +177,36 @@ class CharacterTracker:
         characters = list(candidates.keys())
         return characters
 
+    def seed_characters(self, characters: list[dict[str, Any]]) -> int:
+        """用外部角色表预填外观描述（如 ContentAnalyzer 提取结果）。
+
+        仅在角色尚无描述时写入，保持与 update() 相同的「首次描述优先」策略。
+
+        Args:
+            characters: [{"name": "张三", "desc": "..."}, ...]
+
+        Returns:
+            实际写入的角色数量。
+        """
+        if not characters:
+            return 0
+
+        seeded = 0
+        for entry in characters:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name", "")).strip()
+            desc = str(entry.get("desc", "")).strip()
+            if not name or not desc:
+                continue
+            if name in self._characters:
+                continue
+            self._characters[name] = desc
+            seeded += 1
+            log.info("[CharacterTracker] 角色 %s: %s", name, desc)
+
+        return seeded
+
     def get_character_prompt(self, characters: list[str]) -> str:
         """为已知角色生成描述性 prompt 片段。
 
@@ -226,7 +256,7 @@ class CharacterTracker:
                 description = desc_queue.pop(0).strip().rstrip(",").strip()
                 if description:
                     self._characters[char_name] = description
-                    log.debug("角色描述更新: %s -> %s", char_name, description)
+                    log.info("[CharacterTracker] 角色 %s: %s", char_name, description)
 
     def to_dict(self) -> dict[str, Any]:
         """序列化为字典（用于存储/恢复状态）。"""

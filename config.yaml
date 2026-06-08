@@ -3,7 +3,7 @@
 # 全局 LLM 配置（分段和 Prompt 生成共用，可被模块级配置覆盖）
 llm:
   provider: deepseek  # auto | openai | deepseek | gemini | ollama
-  model: deepseek-v4-flash   # 或 deepseek-v4-pro
+  model: deepseek-v4-pro   # 或 deepseek-v4-pro
   # model: gpt-4o-mini          # openai 便宜
   # model: deepseek-chat         # deepseek 默认
   # model: gemini-2.0-flash-lite # gemini 默认
@@ -20,14 +20,14 @@ segmenter:
   max_chars: 100
   min_chars: 20
   llm:
-    model: deepseek-chat  # 与顶层 llm.provider 保持一致
+    model: deepseek-v4-pro  # 与顶层 llm.provider 保持一致
     temperature: 0.3
 
 # Prompt 生成
 promptgen:
   style: anime  # 风格预设名
   llm:
-    model: deepseek-chat  # 与顶层 llm.provider 保持一致
+    model: deepseek-v4-pro  # 与顶层 llm.provider 保持一致
     temperature: 0.7
   character_tracking: true
 
@@ -77,8 +77,11 @@ tts:
 
 # 字幕
 subtitle:
-  enabled: false   # false = 不生成 SRT、成片不烧字幕（仅保留配音）
+  enabled: true   # false = 不生成 SRT、成片不烧字幕（仅保留配音）
   font_size: 48
+  max_lines: 8    # 单条字幕最多显示行数，超出时自动缩小字号
+  margin_x: 40    # 左右留白（像素），防止字幕贴边或溢出
+  margin_bottom: 340  # 距画面底部的留白（像素），越大字幕越靠上
   font_color: white
   outline_color: black
   outline_width: 2

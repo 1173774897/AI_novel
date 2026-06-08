@@ -405,6 +405,127 @@ class TestVideoAssemblerSubtitleEscaping:
         assert "\\\\:" in escaped     # colon escaped
         assert "%%" in escaped        # percent escaped
 
+    def test_segment_filters_subtitle_after_ken_burns(self, tmp_path):
+        """静态图模式应在 Ken Burns 之后再叠加字幕，避免裁切。"""
+        from unittest.mock import patch
+
+        assembler = self._make_assembler(tmp_path)
+        srt_path = tmp_path / "0000.srt"
+        srt_path.write_text(
+            "1\n00:00:00,000 --> 00:00:02,000\n测试字幕\n",
+            encoding="utf-8",
+        )
+        with patch.object(assembler, "_has_subtitles_filter", return_value=True):
+            parts = assembler._build_segment_video_filter_parts(
+                srt_path, duration=5.0, idx=0,
+            )
+        chain = ",".join(parts)
+        zoom_idx = chain.find("zoompan")
+        sub_idx = chain.find("subtitles")
+        assert zoom_idx >= 0
+        assert sub_idx > zoom_idx
+
+    def test_subtitle_overlay_filters_empty_when_no_ffmpeg_subtitle_support(
+        self, tmp_path,
+    ):
+        """无 libass/drawtext 时应返回空列表，触发 PNG overlay 回退。"""
+        from unittest.mock import patch
+
+        assembler = self._make_assembler(tmp_path)
+        srt_path = tmp_path / "0000.srt"
+        srt_path.write_text(
+            "1\n00:00:00,000 --> 00:00:02,000\n测试字幕\n",
+            encoding="utf-8",
+        )
+        with patch.object(assembler, "_has_subtitles_filter", return_value=False), \
+             patch.object(assembler, "_has_drawtext_filter", return_value=False):
+            assert assembler._subtitle_overlay_filters(srt_path) == []
+
+    def test_subtitle_margin_bottom_moves_text_up(self, tmp_path):
+        """增大 margin_bottom 应将字幕区域整体上移。"""
+        from src.video.video_assembler import VideoAssembler
+
+        low = VideoAssembler(
+            {"resolution": [1080, 1920], "fps": 30, "codec": "libx264"},
+            workspace=tmp_path / "low",
+            subtitle_config={"font_size": 38, "margin_bottom": 80},
+        )
+        high = VideoAssembler(
+            {"resolution": [1080, 1920], "fps": 30, "codec": "libx264"},
+            workspace=tmp_path / "high",
+            subtitle_config={"font_size": 38, "margin_bottom": 200},
+        )
+        text = "测试字幕位置"
+        lines_low, size_low = low._layout_subtitle_lines(text)
+        lines_high, size_high = high._layout_subtitle_lines(text)
+        y_low = 1920 - len(lines_low) * (size_low + 12) - low.subtitle_margin_bottom
+        y_high = 1920 - len(lines_high) * (size_high + 12) - high.subtitle_margin_bottom
+        assert y_high < y_low
+
+    def test_render_subtitle_overlay_png_full_frame_transparent(self, tmp_path):
+        """PNG overlay 回退应生成全画幅透明底字幕层。"""
+        from PIL import Image
+
+        assembler = self._make_assembler(tmp_path)
+        path = assembler._render_subtitle_overlay_png("测试字幕", idx=0, sub_idx=0)
+        img = Image.open(path).convert("RGBA")
+        assert img.size == (1080, 1920)
+        # 顶部透明、底部有字幕像素
+        assert img.getpixel((100, 100))[3] == 0
+        assert img.getpixel((540, 1800))[3] > 0
+
+    def test_layout_subtitle_lines_wraps_long_text_without_two_line_cap(
+        self, tmp_path,
+    ):
+        """长字幕应换行到多行，而不是截断为前两行。"""
+        from src.video.video_assembler import VideoAssembler
+
+        assembler = VideoAssembler(
+            {"resolution": [1080, 1920], "fps": 30, "codec": "libx264"},
+            workspace=tmp_path,
+            subtitle_config={"font_size": 48, "max_lines": 4},
+        )
+        long_text = (
+            "纪实&悬疑】不存在的同学这个非VIP内容，知乎和微博都可以搜到，"
+            "有同学想看一下，我就搬运了，大家看一下就好"
+        )
+        lines, font_size = assembler._layout_subtitle_lines(long_text)
+        joined = "".join(lines)
+        from src.video.video_assembler import _find_cjk_font
+
+        font = _find_cjk_font(font_size)
+        max_w = assembler._subtitle_max_width()
+        assert 1 <= len(lines) <= 4
+        assert joined == long_text
+        assert "知乎和微博" in joined
+        assert "大家看一下就好" in joined
+        assert font_size <= 48
+        for line in lines:
+            assert assembler._measure_text_width(line, font) <= max_w + 2
+
+    def test_layout_subtitle_lines_uses_more_than_two_lines_at_38px(
+        self, tmp_path,
+    ):
+        """38px 字号下长句应拆成 3 行以上，避免左右溢出。"""
+        from src.video.video_assembler import VideoAssembler
+        from src.video import video_assembler as va
+
+        assembler = VideoAssembler(
+            {"resolution": [1080, 1920], "fps": 30, "codec": "libx264"},
+            workspace=tmp_path,
+            subtitle_config={"font_size": 38, "max_lines": 4, "margin_x": 48},
+        )
+        long_text = (
+            "纪实&悬疑】不存在的同学这个非VIP内容，知乎和微博都可以搜到，"
+            "有同学想看一下，我就搬运了，大家看一下就好"
+        )
+        lines, _ = assembler._layout_subtitle_lines(long_text)
+        font = va._find_cjk_font(38)
+        max_w = assembler._subtitle_max_width()
+        assert len(lines) >= 3
+        for line in lines:
+            assert va.VideoAssembler._measure_text_width(line, font) <= max_w + 2
+
     def test_drawtext_chinese_text_with_special_chars(self, tmp_path):
         """Chinese text with colons and special chars should be escaped for drawtext."""
         text = "时间：2024年，地点：上海"

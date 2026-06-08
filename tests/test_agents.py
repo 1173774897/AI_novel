@@ -24,7 +24,11 @@ from src.agents.content_analyzer import (
     ContentAnalyzerAgent,
     content_analyzer_node,
 )
-from src.agents.art_director import ArtDirectorAgent, art_director_node
+from src.agents.art_director import (
+    ArtDirectorAgent,
+    _existing_image_path,
+    art_director_node,
+)
 from src.agents.voice_director import (
     VoiceDirectorAgent,
     voice_director_node,
@@ -542,6 +546,56 @@ class TestContentAnalyzer:
         chars = agent.extract_characters("张三说道：你好。")
         assert isinstance(chars, list)
 
+    def test_extract_characters_llm_returns_detailed_desc(self, minimal_config):
+        """LLM 模式应请求并返回含年龄性别的详细外观描述。"""
+        agent = ContentAnalyzerAgent(minimal_config, budget_mode=False)
+        mock_llm = MagicMock()
+        mock_llm.chat.return_value = MagicMock(
+            content='[{"name": "张三", "desc": "约30岁男性，身材中等偏瘦，短发黑发，穿深色西装，神情焦急"}]'
+        )
+        agent._llm = mock_llm
+
+        chars = agent.extract_characters("张三对着镜头说道：请帮我找到妻子。")
+        assert len(chars) == 1
+        assert chars[0]["name"] == "张三"
+        assert "30岁" in chars[0]["desc"]
+        assert "男" in chars[0]["desc"]
+        prompt = mock_llm.chat.call_args.kwargs["messages"][0]["content"]
+        assert "年龄" in prompt
+        assert "性别" in prompt
+        assert "身材体型" in prompt
+
+    def test_extract_characters_budget_mode_enriches_desc(self, minimal_config):
+        """省钱模式规则提名后，应调用 LLM 补全详细 desc。"""
+        agent = ContentAnalyzerAgent(minimal_config, budget_mode=True)
+        mock_llm = MagicMock()
+        mock_llm.chat.return_value = MagicMock(
+            content='[{"name": "张三", "desc": "约28岁男性，高挑匀称，短发，穿休闲夹克，眉眼坚毅"}]'
+        )
+        agent._llm = mock_llm
+
+        chars = agent.extract_characters("张三说道：你好。李四笑道：很好。")
+        zhang = next(c for c in chars if c["name"] == "张三")
+        assert "28岁" in zhang["desc"]
+        assert "男" in zhang["desc"]
+        enrich_prompt = mock_llm.chat.call_args.kwargs["messages"][0]["content"]
+        assert "角色视觉设定专家" in enrich_prompt
+        assert "张三" in enrich_prompt
+
+    def test_normalize_characters_filters_invalid_entries(self, minimal_config):
+        """_normalize_characters 应过滤无效项并截断到 5 个。"""
+        raw = [
+            {"name": "张三", "desc": "描述A"},
+            {"name": "", "desc": "无名字"},
+            "bad",
+            {"name": "李四", "desc": "描述B"},
+        ]
+        result = ContentAnalyzerAgent._normalize_characters(raw)
+        assert result == [
+            {"name": "张三", "desc": "描述A"},
+            {"name": "李四", "desc": "描述B"},
+        ]
+
     def test_suggest_style_known_combos(self, minimal_config):
         """已知的 (genre, era) 组合应返回对应风格。"""
         agent = ContentAnalyzerAgent(minimal_config)
@@ -773,6 +827,47 @@ class TestArtDirector:
         assert result["quality_scores"] == []
         # 有 start + summary decisions
         assert len(result["decisions"]) == 2
+
+    def test_existing_image_path_detects_png(self, tmp_path):
+        """已有 0001.png 时应被识别为可跳过。"""
+        img_dir = tmp_path / "images"
+        img_dir.mkdir()
+        img = img_dir / "0001.png"
+        img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 200)
+        assert _existing_image_path(img_dir, 1) == img
+
+    def test_existing_image_path_missing_returns_none(self, tmp_path):
+        img_dir = tmp_path / "images"
+        img_dir.mkdir()
+        assert _existing_image_path(img_dir, 0) is None
+
+    @patch("src.agents.art_director.ImageGenTool")
+    @patch("src.agents.art_director.PromptGenTool")
+    def test_art_director_node_skips_existing_images(
+        self, mock_prompt_cls, mock_img_cls, base_state, tmp_path
+    ):
+        """断点续传时应跳过已有图片，只生成缺失段。"""
+        img_dir = tmp_path / "images"
+        img_dir.mkdir(parents=True)
+        existing = img_dir / "0000.png"
+        existing.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 200)
+
+        base_state["segments"] = [
+            {"text": "段1", "index": 0},
+            {"text": "段2", "index": 1},
+        ]
+        base_state["workspace"] = str(tmp_path)
+
+        with patch.object(
+            ArtDirectorAgent,
+            "generate_image",
+            return_value=(img_dir / "0001.png", -1.0, 0, []),
+        ) as mock_gen:
+            result = art_director_node(base_state)
+
+        mock_gen.assert_called_once()
+        assert mock_gen.call_args.args[1] == 1
+        assert result["images"] == [str(existing), str(img_dir / "0001.png")]
 
 
 # ===================================================================
