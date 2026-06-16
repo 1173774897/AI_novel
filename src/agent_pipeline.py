@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from src.agent_state_repair import dedupe_completed_nodes, repair_agent_state_data
 from src.agents.state import AgentState
 from src.agents.utils import save_decisions_to_file
 from src.config_manager import load_config
@@ -25,6 +26,13 @@ class AgentPipeline:
         budget_mode: bool = False,
         quality_threshold: float | None = None,
         config: dict | None = None,
+        *,
+        series_registry_path: Path | str | None = None,
+        episode_id: str | int | None = None,
+        pov_narrator: str | None = None,
+        output_video: Path | str | None = None,
+        exact_workspace: bool = False,
+        era_override: str | None = None,
     ):
         self.input_file = Path(input_file)
         if not self.input_file.exists():
@@ -49,7 +57,10 @@ class AgentPipeline:
         base = Path(
             self.cfg.get("project", {}).get("default_workspace", "workspace")
         )
-        self.workspace = (workspace or base) / proj_name
+        if workspace is not None and exact_workspace:
+            self.workspace = Path(workspace)
+        else:
+            self.workspace = (workspace or base) / proj_name
         self.workspace.mkdir(parents=True, exist_ok=True)
 
         # 子目录
@@ -65,6 +76,17 @@ class AgentPipeline:
 
         self.resume = resume
         self.budget_mode = budget_mode
+
+        self.series_registry_path = (
+            str(series_registry_path) if series_registry_path else None
+        )
+        self.episode_id = episode_id
+        self.pov_narrator = pov_narrator
+        self.output_video = str(output_video) if output_video else None
+        cfg_era = self.cfg.get("promptgen", {}).get("era")
+        self.era_override = era_override or (
+            cfg_era if cfg_era and str(cfg_era).lower() != "auto" else None
+        )
 
         # State 持久化路径
         self.state_file = self.workspace / "agent_state.json"
@@ -98,6 +120,11 @@ class AgentPipeline:
             errors=[],
             completed_nodes=[],
             pipeline_plan=None,
+            series_registry_path=self.series_registry_path,
+            episode_id=self.episode_id,
+            pov_narrator=self.pov_narrator,
+            output_video=self.output_video,
+            era_override=self.era_override,
         )
 
     def _load_state(self) -> AgentState | None:
@@ -108,6 +135,43 @@ class AgentPipeline:
             data = json.loads(self.state_file.read_text(encoding="utf-8"))
             # 恢复配置（不从文件加载，用当前配置）
             data["config"] = self.cfg
+
+            old_workspace = data.get("workspace")
+            new_workspace = str(self.workspace)
+            data["workspace"] = new_workspace
+            if self.series_registry_path:
+                data["series_registry_path"] = self.series_registry_path
+            if self.episode_id is not None:
+                data["episode_id"] = self.episode_id
+            if self.pov_narrator:
+                data["pov_narrator"] = self.pov_narrator
+            if self.output_video:
+                data["output_video"] = self.output_video
+            if self.era_override:
+                data["era_override"] = self.era_override
+
+            if old_workspace and Path(old_workspace).resolve() != Path(new_workspace).resolve():
+                log.warning(
+                    "workspace 路径已变更 (%s → %s)，丢弃旧产物路径",
+                    old_workspace,
+                    new_workspace,
+                )
+                data["images"] = []
+                data["audio_files"] = []
+                data["srt_files"] = []
+                data["quality_scores"] = []
+                data["retry_counts"] = {}
+                completed = data.get("completed_nodes") or []
+                data["completed_nodes"] = [
+                    n for n in completed
+                    if n in ("director", "content_analyzer")
+                ]
+
+            data["completed_nodes"] = dedupe_completed_nodes(
+                data.get("completed_nodes")
+            )
+            data = repair_agent_state_data(data, self.cfg, new_workspace)
+
             return AgentState(**data)
         except Exception as e:
             log.warning("加载 Agent State 失败: %s", e)
@@ -167,8 +231,6 @@ class AgentPipeline:
             )
         except Exception as e:
             log.error("Agent 流水线失败: %s", e)
-            # 注意: 此处保存的是输入 state（非部分进度），仅供调试参考
-            self._save_state(dict(state))
             raise
 
         # 保存最终状态和决策日志

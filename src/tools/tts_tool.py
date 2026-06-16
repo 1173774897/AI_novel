@@ -4,6 +4,9 @@ from pathlib import Path
 from typing import Any
 
 
+from src.tts.tts_params import combine_percent
+
+
 class TTSTool:
     """封装 TTS 配音 + 字幕模块，供 Agent 节点调用。"""
 
@@ -23,7 +26,7 @@ class TTSTool:
         if self._sub_gen is None:
             from src.tts.subtitle_generator import SubtitleGenerator
 
-            self._sub_gen = SubtitleGenerator()
+            self._sub_gen = SubtitleGenerator(self.config.get("subtitle", {}))
         return self._sub_gen
 
     def run(
@@ -35,13 +38,18 @@ class TTSTool:
         volume: str | None = None,
     ) -> tuple[Path, Path]:
         engine = self._get_engine()
-        # 动态 TTS 参数
+        base_tts = self.config.get("tts", {})
+        # 动态 TTS 参数：config.yaml 为基准，rate/volume 为情感偏移量（相加）
         if rate or volume:
-            tts_cfg = dict(self.config["tts"])
+            tts_cfg = dict(base_tts)
             if rate:
-                tts_cfg["rate"] = rate
+                tts_cfg["rate"] = combine_percent(
+                    base_tts.get("rate", "+0%"), rate
+                )
             if volume:
-                tts_cfg["volume"] = volume
+                tts_cfg["volume"] = combine_percent(
+                    base_tts.get("volume", "+0%"), volume
+                )
             from src.tts.tts_engine import TTSEngine
 
             engine = TTSEngine(tts_cfg)

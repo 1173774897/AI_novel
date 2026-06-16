@@ -279,7 +279,7 @@ class Pipeline:
             " + 字幕" if subtitles_enabled else "（无字幕）",
         )
         tts = TTSEngine(self.cfg["tts"])
-        sub_gen = SubtitleGenerator()
+        sub_gen = SubtitleGenerator(self.cfg.get("subtitle", {}))
         results = []
 
         with get_progress() as progress:

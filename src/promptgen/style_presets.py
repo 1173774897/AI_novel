@@ -27,10 +27,14 @@ _BUILTIN_PRESETS: dict[str, dict[str, str]] = {
     },
     "anime": {
         "positive": (
-            "anime style, detailed, vibrant colors, studio ghibli inspired, "
-            "cel shading, beautiful scenery"
+            "anime style, 2D illustration, cel shading, hand-drawn animation aesthetic, "
+            "detailed, vibrant colors, studio ghibli inspired, beautiful scenery, "
+            "NOT photorealistic, NOT live action, NOT 3D render"
         ),
-        "negative": "photo, 3d render, realistic, deformed, blurry, watermark, text, ugly",
+        "negative": (
+            "photorealistic, realistic, photo, photograph, live action, hyperrealistic, "
+            "3d render, cgi, deformed, blurry, watermark, text, ugly"
+        ),
         "prefix": "beautiful anime illustration of",
         "video_style": "anime cinematic style, vibrant colors, detailed animation quality, 4K",
         "video_mood": "dynamic anime atmosphere, expressive lighting",

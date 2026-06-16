@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import platform
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -75,6 +76,14 @@ def _find_cjk_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
 _PUNCT_BREAK = set("，。！？、；： ")
 
 
+def _normalize_subtitle_text(text: str) -> str:
+    """去掉换行/回车并合并空白，避免烧录高度跳动。"""
+    if not text:
+        return ""
+    cleaned = text.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
 def _parse_srt_time(time_str: str) -> float:
     """解析 SRT 时间码 ``HH:MM:SS,mmm`` 为秒数。"""
     time_str = time_str.replace(",", ".")
@@ -109,6 +118,7 @@ class VideoAssembler:
         config: dict,
         workspace: Path,
         subtitle_config: dict | None = None,
+        tmp_dir: Path | None = None,
     ) -> None:
         self.width: int = config["resolution"][0]
         self.height: int = config["resolution"][1]
@@ -122,7 +132,8 @@ class VideoAssembler:
         )
         self.subtitle_max_lines: int = int(sub_cfg.get("max_lines", 4))
         self.subtitle_margin_x: int = int(sub_cfg.get("margin_x", 48))
-        self.subtitle_margin_bottom: int = int(sub_cfg.get("margin_bottom", 80))
+        self.subtitle_margin_bottom: int = int(sub_cfg.get("margin_bottom", 60))
+        self.subtitle_position: str = str(sub_cfg.get("position", "bottom")).lower()
 
         # Ken Burns 参数
         kb_cfg = config.get("ken_burns", {})
@@ -139,8 +150,10 @@ class VideoAssembler:
         self.bgm_path: Path | None = Path(bgm_path) if bgm_path else None
         self.bgm_volume: float = float(bgm_cfg.get("volume", 0.15))
 
-        # 临时文件目录
-        self.tmp_dir: Path = Path(workspace) / "tmp_video"
+        # 临时文件目录（片头等子流程可传入独立 tmp_dir，避免 clip_0000 与正片冲突）
+        self.tmp_dir: Path = (
+            Path(tmp_dir) if tmp_dir is not None else Path(workspace) / "tmp_video"
+        )
         self.tmp_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
@@ -330,7 +343,9 @@ class VideoAssembler:
             if not line:
                 # 空行 = 条目结束
                 if text_lines and "start" in current_entry:
-                    current_entry["text"] = "".join(text_lines)
+                    current_entry["text"] = _normalize_subtitle_text(
+                        " ".join(text_lines)
+                    )
                     if current_entry["end"] > current_entry["start"]:
                         entries.append(current_entry)
                     else:
@@ -353,7 +368,9 @@ class VideoAssembler:
 
         # 处理末尾无空行的最后一条
         if text_lines and "start" in current_entry:
-            current_entry["text"] = "".join(text_lines)
+            current_entry["text"] = _normalize_subtitle_text(
+                " ".join(text_lines)
+            )
             if current_entry["end"] > current_entry["start"]:
                 entries.append(current_entry)
 
@@ -810,38 +827,65 @@ class VideoAssembler:
     # 字幕渲染（特效后叠加）
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _write_sanitized_srt(srt_path: Path, dest: Path) -> None:
+        """解析并规范化 SRT，去掉条目内换行后再写入。"""
+        from src.tts.subtitle_generator import SubtitleGenerator
+
+        entries = VideoAssembler._parse_srt_entries(srt_path)
+        lines: list[str] = []
+        out_idx = 0
+        for entry in entries:
+            text = entry.get("text", "")
+            if not text:
+                continue
+            out_idx += 1
+            lines.append(str(out_idx))
+            lines.append(
+                f"{SubtitleGenerator._format_timestamp(entry['start'])} --> "
+                f"{SubtitleGenerator._format_timestamp(entry['end'])}"
+            )
+            lines.append(text)
+            lines.append("")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text("\n".join(lines), encoding="utf-8")
+
     def _subtitle_overlay_filters(self, srt_path: Path) -> list[str]:
         """在 Ken Burns 等视频特效之后叠加 SRT 字幕的 FFmpeg 滤镜列表。"""
         srt_path = Path(srt_path)
         if not srt_path.exists() or srt_path.stat().st_size == 0:
             return []
 
+        # drawtext 使用固定槽位排版，单行/多行底边一致；优先于 libass
+        drawtext_filters = self._srt_to_drawtext_filters(srt_path)
+        if drawtext_filters and self._has_drawtext_filter():
+            log.info(
+                "使用 drawtext 滤镜渲染字幕 (%d 行，固定底边对齐)",
+                len(drawtext_filters),
+            )
+            return drawtext_filters
+
         if self._has_subtitles_filter():
             safe_srt = self.tmp_dir / f"sub_{srt_path.stem}.srt"
-            shutil.copy2(str(srt_path), str(safe_srt))
+            self._write_sanitized_srt(srt_path, safe_srt)
             escaped_srt = (
                 str(safe_srt.resolve())
                 .replace("\\", "\\\\")
                 .replace(":", "\\:")
                 .replace("'", "\\'")
             )
+            ass_font_size = max(16, self.subtitle_font_size // 2)
             style = (
-                f"FontSize=20,PrimaryColour=&HFFFFFF,"
+                f"FontSize={ass_font_size},PrimaryColour=&HFFFFFF,"
                 f"OutlineColour=&H000000,Outline=2,Shadow=1,"
                 f"Alignment=2,MarginV={self.subtitle_margin_bottom}"
+            )
+            log.info(
+                "使用 subtitles 滤镜渲染字幕 (libass，已规范化 SRT)"
             )
             return [
                 f"subtitles=filename='{escaped_srt}':force_style='{style}'"
             ]
-
-        drawtext_filters = self._srt_to_drawtext_filters(srt_path)
-        if drawtext_filters and self._has_drawtext_filter():
-            log.info(
-                "FFmpeg 未启用 subtitles filter (需要 libass)，"
-                "使用 drawtext 滤镜渲染字幕 (%d 条)",
-                len(drawtext_filters),
-            )
-            return drawtext_filters
 
         if drawtext_filters and not self._has_drawtext_filter():
             log.info(
@@ -894,8 +938,20 @@ class VideoAssembler:
 
         return text[:cut], text[cut:]
 
+    def _subtitle_slot_height(self) -> int:
+        """固定行高槽位，避免自动缩字号导致垂直位置跳动。"""
+        return self.subtitle_font_size + 12
+
+    def _subtitle_y_base(self, canvas_height: int) -> int:
+        """字幕区域顶边 Y（固定槽位，底行始终贴底对齐）。"""
+        reserved = self.subtitle_max_lines * self._subtitle_slot_height()
+        if self.subtitle_position == "center":
+            return (canvas_height - reserved) // 2
+        return canvas_height - self.subtitle_margin_bottom - reserved
+
     def _layout_subtitle_lines(self, text: str) -> tuple[list[str], int]:
         """将字幕文本按像素宽度换行到 max_lines 内，必要时自动缩小字号。"""
+        text = _normalize_subtitle_text(text)
         font_size = self.subtitle_font_size
         max_lines = self.subtitle_max_lines
         max_width = self._subtitle_max_width()
@@ -936,18 +992,19 @@ class VideoAssembler:
         canvas_height: int,
         font_size: int,
     ) -> None:
-        """在画布底部居中绘制多行字幕。"""
-        line_height = font_size + 12
-        total_text_height = len(lines) * line_height
-        y_start = canvas_height - total_text_height - self.subtitle_margin_bottom
+        """在画布底部居中绘制多行字幕（固定槽位，底行高度一致）。"""
+        slot_height = self._subtitle_slot_height()
+        y_base = self._subtitle_y_base(canvas_height)
+        first_line_y = y_base + (self.subtitle_max_lines - len(lines)) * slot_height
+        block_height = len(lines) * slot_height
         bg_pad_x = self.subtitle_margin_x
         bg_pad_y = 16
         max_text_width = canvas_width - 2 * bg_pad_x
 
         draw.rectangle(
             [
-                (bg_pad_x, y_start - bg_pad_y),
-                (canvas_width - bg_pad_x, y_start + total_text_height + bg_pad_y),
+                (bg_pad_x, first_line_y - bg_pad_y),
+                (canvas_width - bg_pad_x, first_line_y + block_height + bg_pad_y),
             ],
             fill=(0, 0, 0, 160),
         )
@@ -958,7 +1015,7 @@ class VideoAssembler:
                 x = bg_pad_x
             else:
                 x = (canvas_width - text_width) // 2
-            y = y_start + i * line_height
+            y = first_line_y + i * slot_height
             for dx in range(-3, 4):
                 for dy in range(-3, 4):
                     if dx == 0 and dy == 0:
@@ -1189,39 +1246,50 @@ class VideoAssembler:
             return []
 
         filters: list[str] = []
+        slot_height = self._subtitle_slot_height()
+        y_base_expr = (
+            f"(h-{self.subtitle_margin_bottom}-"
+            f"{self.subtitle_max_lines * slot_height})"
+        )
+        if self.subtitle_position == "center":
+            y_base_expr = (
+                f"((h-{self.subtitle_max_lines * slot_height})/2)"
+            )
+
         for entry in entries:
             start = entry["start"]
             end = entry["end"]
-            text = entry["text"]
+            text = _normalize_subtitle_text(entry["text"])
             if not text:
                 continue
 
-            # FFmpeg drawtext 特殊字符转义（命令通过 subprocess 列表传递，无 shell 层）
-            # 只需 FFmpeg filter-graph 级别的转义：
-            #   \ -> \\   ' -> '\''   : -> \:   % -> %%
-            escaped = text.replace("\\", "\\\\")
-            escaped = escaped.replace("'", "'\\''")
-            escaped = escaped.replace(":", "\\:")
-            # 转义 % (drawtext 中 % 用于时间码等特殊序列)
-            escaped = escaped.replace("%", "%%")
+            lines, font_size = self._layout_subtitle_lines(text)
+            first_offset = (self.subtitle_max_lines - len(lines)) * slot_height
 
             # 转义 fontfile 路径中的特殊字符
             escaped_font = font_path.replace("\\", "\\\\")
             escaped_font = escaped_font.replace(":", "\\:")
             escaped_font = escaped_font.replace("'", "'\\''")
 
-            f = (
-                f"drawtext=fontfile='{escaped_font}'"
-                f":text='{escaped}'"
-                f":fontsize=40"
-                f":fontcolor=white"
-                f":borderw=2"
-                f":bordercolor=black"
-                f":x=(w-text_w)/2"
-                f":y=h-{self.subtitle_margin_bottom}-text_h"
-                f":enable='between(t,{start:.3f},{end:.3f})'"
-            )
-            filters.append(f)
+            for line_i, line in enumerate(lines):
+                escaped = line.replace("\\", "\\\\")
+                escaped = escaped.replace("'", "'\\''")
+                escaped = escaped.replace(":", "\\:")
+                escaped = escaped.replace("%", "%%")
+
+                y = f"{y_base_expr}+{first_offset + line_i * slot_height}"
+                f = (
+                    f"drawtext=fontfile='{escaped_font}'"
+                    f":text='{escaped}'"
+                    f":fontsize={font_size}"
+                    f":fontcolor=white"
+                    f":borderw=2"
+                    f":bordercolor=black"
+                    f":x=(w-text_w)/2"
+                    f":y={y}"
+                    f":enable='between(t,{start:.3f},{end:.3f})'"
+                )
+                filters.append(f)
 
         return filters
 

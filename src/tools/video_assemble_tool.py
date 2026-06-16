@@ -17,6 +17,7 @@ class VideoAssembleTool:
         output_path: Path,
         workspace: Path,
         video_clips: list[Path] | None = None,
+        tmp_dir: Path | None = None,
     ) -> Path:
         from src.video.video_assembler import VideoAssembler
 
@@ -24,6 +25,7 @@ class VideoAssembleTool:
             self.config["video"],
             workspace,
             subtitle_config=self.config.get("subtitle"),
+            tmp_dir=tmp_dir,
         )
         assembler.assemble(
             images=images,

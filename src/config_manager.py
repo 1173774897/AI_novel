@@ -4,8 +4,72 @@ from pathlib import Path
 from typing import Any
 import yaml
 
+from src.logger import log
+from src.tts.voices import apply_tts_voice
 
 _DEFAULT_CONFIG = Path(__file__).resolve().parent.parent / "config.yaml"
+
+# imagegen.ratio -> video.resolution（1080p 基准）
+_RATIO_TO_VIDEO_RESOLUTION: dict[str, list[int]] = {
+    "9:16": [1080, 1920],
+    "16:9": [1920, 1080],
+    "1:1": [1080, 1080],
+    "4:3": [1440, 1080],
+    "3:4": [1080, 1440],
+    "3:2": [1620, 1080],
+    "2:3": [1080, 1620],
+    "21:9": [2520, 1080],
+}
+
+
+def resolution_for_image_ratio(ratio: str) -> list[int] | None:
+    """根据 imagegen.ratio 推导推荐成片分辨率。"""
+    key = str(ratio).strip()
+    return _RATIO_TO_VIDEO_RESOLUTION.get(key)
+
+
+def _is_portrait_resolution(resolution: list[int]) -> bool:
+    return len(resolution) == 2 and resolution[0] < resolution[1]
+
+
+def _apply_video_resolution_from_imagegen(cfg: dict) -> None:
+    """按 imagegen.ratio 同步或校验 video.resolution。"""
+    imagegen = cfg.get("imagegen") or {}
+    video = cfg.get("video") or {}
+    ratio = imagegen.get("ratio")
+    if not ratio:
+        return
+
+    mapped = resolution_for_image_ratio(str(ratio))
+    if mapped is None:
+        return
+
+    current = video.get("resolution")
+    auto = bool(video.get("auto_resolution", False))
+
+    if auto:
+        if current != mapped:
+            log.info(
+                "video.auto_resolution=true: 按 imagegen.ratio=%s 设置 video.resolution=%s",
+                ratio,
+                mapped,
+            )
+        video["resolution"] = mapped
+        return
+
+    if not isinstance(current, list) or len(current) != 2:
+        return
+
+    mapped_portrait = _is_portrait_resolution(mapped)
+    current_portrait = _is_portrait_resolution(current)
+    if mapped_portrait != current_portrait:
+        log.warning(
+            "imagegen.ratio=%s 与 video.resolution=%s 方向不一致，"
+            "横图会被裁切进竖屏画幅；可改 video.resolution=%s 或设 video.auto_resolution: true",
+            ratio,
+            current,
+            mapped,
+        )
 
 
 def load_config(path: Path | str | None = None) -> dict[str, Any]:
@@ -19,6 +83,8 @@ def load_config(path: Path | str | None = None) -> dict[str, Any]:
             f"配置文件内容无效（期望字典，得到 {type(cfg).__name__}）: {path}"
         )
     _validate(cfg)
+    _apply_video_resolution_from_imagegen(cfg)
+    apply_tts_voice(cfg)
     return cfg
 
 

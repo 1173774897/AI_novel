@@ -410,6 +410,7 @@ export default function SettingsPage() {
                   <option value="dashscope">阿里云万相</option>
                   <option value="together">Together.ai</option>
                   <option value="diffusers">本地 Diffusers</option>
+                  <option value="jimeng-cli">即梦 CLI (本地)</option>
                 </select>
               </div>
 

@@ -56,6 +56,7 @@ class JudgeConfig:
 # Writer provider → Judge provider 的异源映射
 _WRITER_TO_JUDGE_PROVIDER: dict[str, tuple[str, str]] = {
     "deepseek": ("gemini", "gemini-2.5-flash"),
+    "dashscope": ("deepseek", "deepseek-chat"),
     "gemini": ("deepseek", "deepseek-chat"),
     "openai": ("gemini", "gemini-2.5-flash"),
     "ollama": ("gemini", "gemini-2.5-flash"),
@@ -68,6 +69,7 @@ _WRITER_TO_JUDGE_PROVIDER: dict[str, tuple[str, str]] = {
 _PROVIDER_ENV_KEY: dict[str, str] = {
     "gemini": "GEMINI_API_KEY",
     "deepseek": "DEEPSEEK_API_KEY",
+    "dashscope": "DASHSCOPE_API_KEY",
     "openai": "OPENAI_API_KEY",
     "siliconflow": "SILICONFLOW_API_KEY",
     "kimi": "MOONSHOT_API_KEY",
@@ -78,6 +80,7 @@ _PROVIDER_ENV_KEY: dict[str, str] = {
 _PROVIDER_DEFAULT_MODEL: dict[str, str] = {
     "gemini": "gemini-2.5-flash",
     "deepseek": "deepseek-chat",
+    "dashscope": "qwen-plus",
     "openai": "gpt-4o-mini",
     # SiliconFlow 默认 GLM-4.6（旗舰，支持 json_mode）。GLM-4.5-Air / GLM-4.5V 不支持 json_mode 不能当 judge。
     "siliconflow": "zai-org/GLM-4.6",
@@ -145,7 +148,7 @@ def auto_select_judge(writer_provider: str) -> JudgeConfig:
     # 回退：按 gemini → deepseek → openai → siliconflow → kimi → zhipu → ollama 顺序找一个异源且 key 可用的
     # 云服务（siliconflow / kimi / zhipu）排在 openai 之后、ollama 之前：云服务比本地 ollama 稳定，但 OpenAI / Gemini 优先级仍最高
     # zhipu 排在 kimi 之后是因为 kimi moonshot-v1-auto 默认 8k 路由更便宜，zhipu glm-4.6 上下文有 200K 但更贵
-    for candidate in ("gemini", "deepseek", "openai", "siliconflow", "kimi", "zhipu", "ollama"):
+    for candidate in ("gemini", "deepseek", "dashscope", "openai", "siliconflow", "kimi", "zhipu", "ollama"):
         if candidate == key:
             continue
         if _provider_key_available(candidate):

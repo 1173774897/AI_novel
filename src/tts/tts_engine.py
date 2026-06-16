@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 from src.logger import log
+from src.tts.voices import resolve_tts_voice
 
 # 单段文本最大字符数，超过此长度会分块合成后拼接
 _MAX_CHUNK_CHARS = 5000
@@ -25,7 +26,7 @@ class TTSEngine:
     """
 
     def __init__(self, config: dict) -> None:
-        self.voice: str = config.get("voice", "zh-CN-YunxiNeural")
+        self.voice: str = resolve_tts_voice(config)
         self.rate: str = config.get("rate", "+0%")
         self.volume: str = config.get("volume", "+0%")
 
@@ -54,10 +55,48 @@ class TTSEngine:
             log.warning("TTS 收到空文本，生成静音占位文件")
             return self._generate_silent_placeholder(output_path)
 
+        from src.tts.text_split import split_utterances
+
+        utterances = split_utterances(text)
+        if not utterances:
+            log.warning("TTS 文本仅含无法朗读的标点，生成静音占位: %r", text[:40])
+            return self._generate_silent_placeholder(output_path)
+
+        if len(utterances) > 1:
+            last_exc: Exception | None = None
+            for attempt in range(_TTS_MAX_RETRIES):
+                try:
+                    audio_path, boundaries = self._run_synthesize_utterances(
+                        utterances, output_path
+                    )
+                    log.debug(
+                        "TTS 完成(多句): %s (%d 句, 边界 %d 条)",
+                        output_path.name,
+                        len(utterances),
+                        len(boundaries),
+                    )
+                    return audio_path, boundaries
+                except Exception as exc:
+                    last_exc = exc
+                    if attempt >= _TTS_MAX_RETRIES - 1:
+                        break
+                    delay = _TTS_RETRY_BASE_DELAY * (2 ** attempt)
+                    log.warning(
+                        "TTS 多句合成失败，%ds 后重试 (%d/%d): %s",
+                        delay,
+                        attempt + 1,
+                        _TTS_MAX_RETRIES,
+                        exc,
+                    )
+                    time.sleep(delay)
+            log.error("TTS 合成失败: %s", last_exc)
+            raise last_exc  # type: ignore[misc]
+
+        single_text = utterances[0] if len(utterances) == 1 else text
         last_exc: Exception | None = None
         for attempt in range(_TTS_MAX_RETRIES):
             try:
-                audio_path, boundaries = self._run_synthesize(text, output_path)
+                audio_path, boundaries = self._run_synthesize(single_text, output_path)
                 log.debug(
                     "TTS 完成: %s (词边界 %d 条)", output_path.name, len(boundaries)
                 )
@@ -97,6 +136,26 @@ class TTSEngine:
                 )
                 return future.result()
         return asyncio.run(self._synthesize_async(text, output_path))
+
+    def _run_synthesize_utterances(
+        self, utterances: list[str], output_path: Path
+    ) -> tuple[Path, list[dict]]:
+        """执行多句 edge-tts 合成（无重试）。"""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(
+                    asyncio.run,
+                    self._synthesize_utterances_async(utterances, output_path),
+                )
+                return future.result()
+        return asyncio.run(self._synthesize_utterances_async(utterances, output_path))
 
     # ------------------------------------------------------------------
     # Async internals
@@ -149,6 +208,64 @@ class TTSEngine:
         output_path.write_bytes(b"".join(audio_chunks))
         # 中文 edge-tts 通常只返回 SentenceBoundary，WordBoundary 为空
         boundaries = word_boundaries if word_boundaries else sentence_boundaries
+        return output_path, boundaries
+
+    async def _synthesize_utterances_async(
+        self, utterances: list[str], output_path: Path
+    ) -> tuple[Path, list[dict]]:
+        """按断句规则逐句合成后拼接音频与边界。"""
+        import edge_tts
+
+        all_audio: list[bytes] = []
+        all_boundaries: list[dict] = []
+        all_sentence_boundaries: list[dict] = []
+        cumulative_offset: float = 0.0
+
+        for utterance in utterances:
+            if not utterance.strip():
+                continue
+            from src.tts.text_split import is_unspeakable_fragment
+
+            if is_unspeakable_fragment(utterance):
+                log.warning("TTS 跳过无法朗读的标点片段: %r", utterance)
+                continue
+            communicate = edge_tts.Communicate(
+                text=utterance,
+                voice=self.voice,
+                rate=self.rate,
+                volume=self.volume,
+            )
+
+            chunk_audio: list[bytes] = []
+            chunk_last_end: float = 0.0
+
+            async for event in communicate.stream():
+                if event["type"] == "audio":
+                    chunk_audio.append(event["data"])
+                elif event["type"] in ("WordBoundary", "SentenceBoundary"):
+                    offset_sec = event["offset"] / 10_000_000
+                    duration_sec = event["duration"] / 10_000_000
+                    entry = {
+                        "offset": cumulative_offset + offset_sec,
+                        "duration": duration_sec,
+                        "text": event["text"],
+                    }
+                    if event["type"] == "WordBoundary":
+                        all_boundaries.append(entry)
+                    else:
+                        all_sentence_boundaries.append(entry)
+                    end_of_word = offset_sec + duration_sec
+                    if end_of_word > chunk_last_end:
+                        chunk_last_end = end_of_word
+
+            all_audio.extend(chunk_audio)
+            cumulative_offset += chunk_last_end
+
+        if not all_audio:
+            raise RuntimeError("edge-tts 未返回任何音频数据（多句模式）")
+
+        output_path.write_bytes(b"".join(all_audio))
+        boundaries = all_boundaries if all_boundaries else all_sentence_boundaries
         return output_path, boundaries
 
     async def _synthesize_long_text(
@@ -215,22 +332,21 @@ class TTSEngine:
 
     @staticmethod
     def _split_long_text(text: str, max_chars: int = _MAX_CHUNK_CHARS) -> list[str]:
-        """按中文标点或换行将长文本拆分为较短的块。"""
-        import re
+        """将长文本拆分为不超过 max_chars 的块（先按断句规则，再合并）。"""
+        from src.tts.text_split import split_utterances
 
-        # 优先在句号、问号、感叹号、换行处断开
-        sentences = re.split(r"(?<=[。！？\n])", text)
+        utterances = split_utterances(text)
         chunks: list[str] = []
         current = ""
 
-        for sentence in sentences:
-            if not sentence:
+        for utterance in utterances:
+            if not utterance:
                 continue
-            if len(current) + len(sentence) > max_chars and current:
+            if len(current) + len(utterance) > max_chars and current:
                 chunks.append(current)
-                current = sentence
+                current = utterance
             else:
-                current += sentence
+                current += utterance
 
         if current:
             chunks.append(current)

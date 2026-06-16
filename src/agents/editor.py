@@ -33,9 +33,14 @@ def editor_node(state: AgentState) -> dict:
 
     # 输出路径
     input_stem = Path(state["input_file"]).stem
-    output_dir = Path(config.get("project", {}).get("default_output", "output"))
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"{input_stem}.mp4"
+    custom_output = state.get("output_video")
+    if custom_output:
+        output_path = Path(custom_output)
+    else:
+        output_dir = Path(config.get("project", {}).get("default_output", "output"))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"{input_stem}.mp4"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     video_clips = None
     if state.get("video_clips"):

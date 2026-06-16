@@ -55,6 +55,7 @@ def minimal_config() -> dict:
         "tts": {"voice": "zh-CN-XiaoxiaoNeural", "rate": "+0%", "volume": "+0%"},
         "video": {"resolution": [1080, 1920]},
         "llm": {},
+        "agent": {"character_review": {"enabled": False}},
         "project": {"default_workspace": "workspace", "default_output": "output"},
     }
 
@@ -510,12 +511,12 @@ class TestContentAnalyzer:
         chars = agent.extract_characters("今天天气很好，适合出门散步。")
         assert chars == []
 
-    def test_extract_characters_max_five(self, minimal_config):
-        """规则模式最多返回 5 个角色。"""
+    def test_extract_characters_max_eight(self, minimal_config):
+        """规则模式最多返回 8 个角色。"""
         agent = ContentAnalyzerAgent(minimal_config, budget_mode=True)
-        text = "".join(f"角色{chr(0x4e00 + i)}说道：你好。" for i in range(10))
+        text = "".join(f"角色{chr(0x4e00 + i)}说道：你好。" for i in range(12))
         chars = agent.extract_characters(text)
-        assert len(chars) <= 5
+        assert len(chars) <= 8
 
     def test_extract_characters_dedup(self, minimal_config):
         """同一角色多次出现应去重。"""
@@ -564,6 +565,8 @@ class TestContentAnalyzer:
         assert "年龄" in prompt
         assert "性别" in prompt
         assert "身材体型" in prompt
+        assert "发型" in prompt
+        assert "写死" in prompt
 
     def test_extract_characters_budget_mode_enriches_desc(self, minimal_config):
         """省钱模式规则提名后，应调用 LLM 补全详细 desc。"""
@@ -581,9 +584,167 @@ class TestContentAnalyzer:
         enrich_prompt = mock_llm.chat.call_args.kwargs["messages"][0]["content"]
         assert "角色视觉设定专家" in enrich_prompt
         assert "张三" in enrich_prompt
+        assert "发型" in enrich_prompt
+
+    def test_desc_has_hairstyle_detects_common_styles(self, minimal_config):
+        assert ContentAnalyzerAgent._desc_has_hairstyle("黑色利落短发，穿白衬衫")
+        assert ContentAnalyzerAgent._desc_has_hairstyle("乌黑长发微卷披肩")
+        assert not ContentAnalyzerAgent._desc_has_hairstyle("相貌平平，戴近视眼镜")
+
+    def test_insert_hairstyle_into_desc_after_age_clause(self, minimal_config):
+        desc = "约20岁的女大学生，相貌平平，戴近视眼镜。"
+        patched = ContentAnalyzerAgent._insert_hairstyle_into_desc(
+            desc, "黑色齐肩直发，简单扎成低马尾"
+        )
+        assert patched.startswith("约20岁的女大学生，黑色齐肩直发，简单扎成低马尾，")
+
+    def test_infer_hairstyle_from_story_text(self, minimal_config):
+        text = Path("input/被自己出卖.txt").read_text(encoding="utf-8")
+        assert ContentAnalyzerAgent._infer_hairstyle_from_text(text, "周玲") == "黑色短发"
+        assert ContentAnalyzerAgent._infer_hairstyle_from_text(text, "林郁") == "黑色长发微卷"
+        liu_hair = ContentAnalyzerAgent._infer_hairstyle_from_text(text, "刘丽华")
+        assert liu_hair == "黑色齐肩直发，简单扎成低马尾"
+        assert liu_hair != ContentAnalyzerAgent._infer_hairstyle_from_text(text, "周玲")
+
+    def test_finalize_character_descriptions_patches_missing_hair(self, minimal_config):
+        text = Path("input/被自己出卖.txt").read_text(encoding="utf-8")
+        chars = ContentAnalyzerAgent._finalize_character_descriptions(
+            [{"name": "刘丽华", "desc": "约20岁的女大学生，相貌平平，戴近视眼镜。"}],
+            text,
+        )
+        assert ContentAnalyzerAgent._desc_has_hairstyle(chars[0]["desc"])
+        assert "齐肩" in chars[0]["desc"] or "短发" in chars[0]["desc"]
+
+    def test_extract_characters_patches_missing_hairstyle(self, minimal_config):
+        agent = ContentAnalyzerAgent(minimal_config, budget_mode=False)
+        mock_llm = MagicMock()
+        mock_llm.chat.return_value = MagicMock(
+            content='[{"name": "刘丽华", "desc": "约20岁女性，相貌平平，戴近视眼镜，穿朴素常服"}]'
+        )
+        agent._llm = mock_llm
+        text = (
+            "左边的女生相貌平平，戴着近视眼睛，我猜她应该是刘丽华。"
+            "右边的女生则留着短发，脖子修长，我想她应该就是周玲了。"
+        )
+        chars = agent.extract_characters(text)
+        assert chars[0]["name"] == "刘丽华"
+        assert ContentAnalyzerAgent._desc_has_hairstyle(chars[0]["desc"])
+
+    def test_discover_character_names_finds_chenjia(self, minimal_config):
+        text = Path("input/被自己出卖.txt").read_text(encoding="utf-8")
+        names = ContentAnalyzerAgent._discover_character_names_from_full_text(text)
+        assert "陈佳" in names
+
+    def test_discover_character_names_finds_zhou_ling(self, minimal_config):
+        text = Path("input/被自己出卖.txt").read_text(encoding="utf-8")
+        names = ContentAnalyzerAgent._discover_character_names_from_full_text(text)
+        assert "周玲" in names
+
+    def test_discover_eerie_exam_ticket_key_names(self, minimal_config):
+        """诡异的准考证：应发现张厉/蔡明微/舒然，过滤考场等噪声。"""
+        text = Path("input/诡异的准考证.txt").read_text(encoding="utf-8")
+        names = ContentAnalyzerAgent._discover_character_names_from_full_text(text)
+        assert "张厉" in names[:5]
+        assert "舒然" in names[:8]
+        assert "蔡明微" in names[:8]
+        assert "老师" not in names[:6]
+        assert "考场" not in names[:6]
+        assert "马甲" not in names[:6]
+        assert ContentAnalyzerAgent._extract_protagonist_name_from_text(text) == "王璟"
+
+    def test_reconcile_eerie_exam_ticket_aliases(self, minimal_config):
+        """泛称应合并为真名，并挤入张厉。"""
+        text = Path("input/诡异的准考证.txt").read_text(encoding="utf-8")
+        llm_chars = [
+            {"name": "我", "desc": "叙述者黑框眼镜"},
+            {"name": "前桌", "desc": "年级第一"},
+            {"name": "校霸", "desc": "寸头壮汉"},
+            {"name": "男监考老师", "desc": "骷髅胸牌"},
+            {"name": "女监考老师", "desc": "染血准考证"},
+            {"name": "舒然", "desc": "校服女生"},
+        ]
+        agent = ContentAnalyzerAgent(minimal_config, budget_mode=False)
+        merged = agent._supplement_discovered_characters(llm_chars, text)
+        reconciled, applied = ContentAnalyzerAgent._reconcile_character_aliases(merged, text)
+        names = [c["name"] for c in reconciled]
+        assert ("我", "王璟") in applied
+        assert ("女监考老师", "蔡明微") in applied
+        assert "王璟" in names
+        assert "张厉" in names
+        assert "蔡明微" in names
+        assert "舒然" in names
+        assert "我" not in names
+        assert "女监考老师" not in names
+        assert "前桌" not in names
+
+    def test_build_character_alias_map_for_eerie_exam_ticket(self, minimal_config):
+        text = Path("input/诡异的准考证.txt").read_text(encoding="utf-8")
+        alias_map = ContentAnalyzerAgent._build_character_alias_map(text)
+        assert alias_map["我"] == "王璟"
+        assert alias_map["女监考老师"] == "蔡明微"
+        assert alias_map["蔡老师"] == "蔡明微"
+
+    def test_extract_eerie_exam_ticket_from_bad_llm_output(self, minimal_config):
+        """模拟 LLM 返回泛称列表，整条链路应纠正为真名阵容。"""
+        agent = ContentAnalyzerAgent(minimal_config, budget_mode=False)
+        mock_llm = MagicMock()
+        mock_llm.chat.return_value = MagicMock(
+            content=(
+                '[{"name": "我", "desc": "约18岁男生，黑色短发，黑框眼镜，神情阴郁"}, '
+                '{"name": "前桌", "desc": "约17岁女生，黑色高马尾，金丝眼镜"}, '
+                '{"name": "校霸", "desc": "约18岁男生，黑色寸头，魁梧"}, '
+                '{"name": "男监考老师", "desc": "约30岁男性，白衬衫，骷髅监考证"}, '
+                '{"name": "女监考老师", "desc": "约40岁女性，乌黑短发，染血准考证"}, '
+                '{"name": "舒然", "desc": "约18岁女生，黑色短发，校服"}]'
+            )
+        )
+        agent._llm = mock_llm
+        text = Path("input/诡异的准考证.txt").read_text(encoding="utf-8")
+        chars = agent.extract_characters(text)
+        names = [c["name"] for c in chars]
+        assert "王璟" in names
+        assert "张厉" in names
+        assert "蔡明微" in names
+        assert "舒然" in names
+        assert "我" not in names
+        assert "前桌" not in names
+
+    def test_discover_late_character_chenjia(self, minimal_config):
+        """后段出场角色陈佳应通过全文扫描补入角色表。"""
+        agent = ContentAnalyzerAgent(minimal_config, budget_mode=False)
+        mock_llm = MagicMock()
+        extract_resp = MagicMock(
+            content='[{"name": "李同学", "desc": "男主"}, '
+            '{"name": "林映洁", "desc": "女友"}, '
+            '{"name": "张得胜", "desc": "教授"}]'
+        )
+        enrich_resp = MagicMock(
+            content='[{"name": "陈佳", "desc": "约20岁女性，身材纤细，瓜子脸，神情羞愧，穿休闲校服"}]'
+        )
+
+        def chat_side_effect(*_args, **kwargs):
+            prompt = kwargs["messages"][0]["content"]
+            if "已从文本识别出的角色名" in prompt:
+                return enrich_resp
+            return extract_resp
+
+        mock_llm.chat.side_effect = chat_side_effect
+        agent._llm = mock_llm
+        text = Path("input/被自己出卖.txt").read_text(encoding="utf-8")
+        chars = agent.extract_characters(text)
+        names = [c["name"] for c in chars]
+        assert "陈佳" in names
+        chenjia = next(c for c in chars if c["name"] == "陈佳")
+        assert chenjia["desc"]
+        assert "女" in chenjia["desc"]
+
+    def test_sample_text_includes_tail_for_late_characters(self, minimal_config):
+        body = "A" * 7000 + "在陈佳看到我时，她脸色羞愧。"
+        sample = ContentAnalyzerAgent._sample_text_for_character_extraction(body)
+        assert "陈佳" in sample
 
     def test_normalize_characters_filters_invalid_entries(self, minimal_config):
-        """_normalize_characters 应过滤无效项并截断到 5 个。"""
+        """_normalize_characters 应过滤无效项并截断到 8 个。"""
         raw = [
             {"name": "张三", "desc": "描述A"},
             {"name": "", "desc": "无名字"},
@@ -596,12 +757,27 @@ class TestContentAnalyzer:
             {"name": "李四", "desc": "描述B"},
         ]
 
+    def test_reconcile_li_surname_with_dialogue_names(self, minimal_config):
+        """对话称呼中的「李昌，」应校正 LLM 误识别的 李逸。"""
+        text = (
+            "张得胜问道。周玲说：「李昌，你别乱说。」"
+            "林映洁说：「李昌，你真可怜。」"
+        )
+        llm_chars = [
+            {"name": "李逸", "desc": "错误名字"},
+            {"name": "林映洁", "desc": "女友"},
+        ]
+        result = ContentAnalyzerAgent._reconcile_with_dialogue_names(llm_chars, text)
+        assert result[0]["name"] == "李昌"
+        assert result[0]["desc"] == "错误名字"
+        assert result[1]["name"] == "林映洁"
+
     def test_suggest_style_known_combos(self, minimal_config):
         """已知的 (genre, era) 组合应返回对应风格。"""
         agent = ContentAnalyzerAgent(minimal_config)
         assert agent.suggest_style("武侠", "古代") == "chinese_ink"
         assert agent.suggest_style("玄幻", "架空") == "anime"
-        assert agent.suggest_style("都市", "现代") == "realistic"
+        assert agent.suggest_style("都市", "现代") == "anime"
         assert agent.suggest_style("科幻", "未来") == "cyberpunk"
         assert agent.suggest_style("言情", "现代") == "watercolor"
 
@@ -612,13 +788,13 @@ class TestContentAnalyzer:
 
     @patch("src.agents.content_analyzer.SegmentTool")
     def test_content_analyzer_node_returns_correct_keys(self, mock_seg_cls, base_state):
-        """content_analyzer_node 应返回 segments/genre/era/characters/style/decisions。"""
+        """content_analyzer_node 应返回 segments/genre/era/characters/style/intro_variants/decisions。"""
         mock_seg_instance = MagicMock()
         mock_seg_instance.run.return_value = [{"text": "段1", "index": 0}]
         mock_seg_cls.return_value = mock_seg_instance
 
         base_state["budget_mode"] = True
-        base_state["full_text"] = "江湖侠客行，剑气纵横。"
+        base_state["full_text"] = "【略恐】无尽恶意\n\n深夜，外面楼道很吵。"
 
         result = content_analyzer_node(base_state)
 
@@ -627,8 +803,12 @@ class TestContentAnalyzer:
         assert "era" in result
         assert "characters" in result
         assert "suggested_style" in result
+        assert "intro_variants" in result
+        assert len(result["intro_variants"]) == 3
+        assert all(isinstance(s, str) and s for s in result["intro_variants"])
         assert "decisions" in result
-        assert len(result["decisions"]) == 4  # segment + classify + characters + style
+        assert len(result["decisions"]) == 5  # segment + classify + characters + style + intro
+        assert any(d.get("step") == "intro_variants" for d in result["decisions"])
 
     @patch("src.agents.content_analyzer.SegmentTool")
     def test_content_analyzer_node_empty_text(self, mock_seg_cls, base_state):
@@ -644,6 +824,63 @@ class TestContentAnalyzer:
 
         assert result["segments"] == []
         assert result["genre"] == "其他"
+        assert len(result.get("intro_variants", [])) == 3
+
+    def test_generate_intro_variants_budget_mode(self, minimal_config):
+        agent = ContentAnalyzerAgent(minimal_config, budget_mode=True)
+        text = "【略恐】无尽恶意\n\n深夜，外面楼道很吵。"
+        genre_info = {"genre": "悬疑", "era": "现代"}
+        variants = agent.generate_intro_variants(text, genre_info)
+        assert len(variants) == 3
+        assert "无尽恶意" in variants[0]
+
+    def test_extract_story_title_from_tagged_header(self):
+        text = "【略恐】无尽恶意\n\n正文"
+        assert ContentAnalyzerAgent._extract_story_title(text) == "无尽恶意"
+
+    def test_normalize_intro_variants_filters_garbage(self):
+        raw = ["  第一句介绍  ", 123, "", "第二句介绍"]
+        assert ContentAnalyzerAgent._normalize_intro_variants(raw) == [
+            "第一句介绍",
+            "第二句介绍",
+        ]
+
+    @patch.object(ContentAnalyzerAgent, "_get_llm")
+    def test_generate_intro_variants_llm_success(self, mock_get_llm, minimal_config):
+        mock_llm = MagicMock()
+        mock_llm.chat.return_value = MagicMock(
+            content='{"intro_variants": ["深夜别出门楼道藏杀手", "业主群一句警告无人敢信", "欺凌压垮501恶意换血案"]}'
+        )
+        mock_get_llm.return_value = mock_llm
+
+        agent = ContentAnalyzerAgent(minimal_config, budget_mode=False)
+        variants = agent.generate_intro_variants("【略恐】无尽恶意\n正文", {"genre": "悬疑"})
+        assert len(variants) == 3
+        assert variants[0] == "深夜别出门楼道藏杀手"
+        mock_llm.chat.assert_called_once()
+
+    @patch.object(ContentAnalyzerAgent, "_get_llm")
+    def test_generate_intro_variants_llm_failure_fallback(self, mock_get_llm, minimal_config):
+        mock_get_llm.side_effect = RuntimeError("api down")
+        agent = ContentAnalyzerAgent(minimal_config, budget_mode=False)
+        text = "【略恐】无尽恶意\n正文"
+        variants = agent.generate_intro_variants(text, {"genre": "悬疑"})
+        assert len(variants) == 3
+        assert "无尽恶意" in variants[0]
+
+    @patch.object(ContentAnalyzerAgent, "_get_llm")
+    def test_generate_intro_variants_llm_partial_padded(self, mock_get_llm, minimal_config):
+        mock_llm = MagicMock()
+        mock_llm.chat.return_value = MagicMock(
+            content='{"intro_variants": ["只有一条介绍文案"]}'
+        )
+        mock_get_llm.return_value = mock_llm
+
+        agent = ContentAnalyzerAgent(minimal_config, budget_mode=False)
+        variants = agent.generate_intro_variants("【略恐】无尽恶意\n正文", {"genre": "悬疑"})
+        assert len(variants) == 3
+        assert variants[0] == "只有一条介绍文案"
+        assert variants[1] != variants[0]
 
 
 # ===================================================================
@@ -677,6 +914,110 @@ class TestArtDirector:
         assert len(decisions) == 1
         assert decisions[0]["agent"] == "ArtDirector"
         mock_img.run.assert_called_once()
+
+    @patch("src.agents.art_director.ImageGenTool")
+    @patch("src.agents.art_director.PromptGenTool")
+    def test_generate_image_jimeng_failure_softens_prompt(
+        self, mock_prompt_cls, mock_img_cls, minimal_config, tmp_path
+    ):
+        """即梦拒稿时应软化 prompt 重试，而非直接中断流水线。"""
+        from src.imagegen.jimeng_cli_backend import JimengGenerationError
+
+        mock_prompt = MagicMock()
+        mock_prompt.run.return_value = "sensitive scene"
+        mock_prompt_cls.return_value = mock_prompt
+
+        mock_img = MagicMock()
+        mock_img.run.side_effect = [
+            JimengGenerationError("generation failed: final generation failed"),
+            None,
+        ]
+        mock_img_cls.return_value = mock_img
+
+        agent = ArtDirectorAgent(minimal_config, budget_mode=True)
+        agent.prompt_gen = mock_prompt
+        agent.image_gen = mock_img
+
+        path, score, retries, decisions = agent.generate_image("测试", 1, tmp_path)
+
+        assert score == -1.0
+        assert mock_img.run.call_count == 2
+        assert mock_img.run.call_args_list[0].args[0] == "sensitive scene"
+        assert "PG-13" in mock_img.run.call_args_list[1].args[0]
+        assert any(d.get("step") == "moderation_fallback_seg1" for d in decisions)
+
+    @patch("src.agents.art_director.ImageGenTool")
+    @patch("src.agents.art_director.PromptGenTool")
+    def test_generate_image_jimeng_regen_after_soften(
+        self, mock_prompt_cls, mock_img_cls, minimal_config, tmp_path
+    ):
+        """软化 3 次失败后，换角度 prompt 应成功。"""
+        from src.imagegen.jimeng_cli_backend import JimengGenerationError
+
+        mock_prompt = MagicMock()
+        mock_prompt.run.return_value = "sensitive scene"
+        mock_prompt.run_alternate.return_value = "wide safe establishing shot"
+        mock_prompt_cls.return_value = mock_prompt
+
+        err = JimengGenerationError("generation failed: final generation failed")
+        mock_img = MagicMock()
+        mock_img.run.side_effect = [err] * 3 + [None]
+        mock_img_cls.return_value = mock_img
+
+        agent = ArtDirectorAgent(minimal_config, budget_mode=True)
+        agent.prompt_gen = mock_prompt
+        agent.image_gen = mock_img
+
+        path, score, _, decisions = agent.generate_image("测试", 3, tmp_path)
+
+        assert score == -1.0
+        assert mock_img.run.call_count == 4
+        mock_prompt.run_alternate.assert_called_once_with(
+            "测试", segment_index=3, full_text=None, prev_text=None, variant=0
+        )
+        assert any(d.get("step") == "moderation_fallback_seg3" for d in decisions)
+
+    @patch("src.agents.art_director.ImageGenTool")
+    @patch("src.agents.art_director.PromptGenTool")
+    def test_generate_image_jimeng_exhausted_uses_placeholder(
+        self, mock_prompt_cls, mock_img_cls, minimal_config, tmp_path
+    ):
+        """即梦连续拒稿时应写入占位图，不中断流水线。"""
+        from src.imagegen.jimeng_cli_backend import JimengGenerationError
+
+        mock_prompt = MagicMock()
+        mock_prompt.run.return_value = "bloody horror scene"
+        mock_prompt.run_alternate.side_effect = [
+            "alt angle 1",
+            "alt angle 2",
+            "alt angle 3",
+        ]
+        mock_prompt_cls.return_value = mock_prompt
+
+        err = JimengGenerationError("generation failed: final generation failed")
+        mock_img = MagicMock()
+        mock_img.run.side_effect = err
+        mock_img_cls.return_value = mock_img
+
+        agent = ArtDirectorAgent(minimal_config, budget_mode=True)
+        agent.prompt_gen = mock_prompt
+        agent.image_gen = mock_img
+
+        path, score, _, decisions = agent.generate_image("测试", 2, tmp_path)
+
+        assert score == -1.0
+        assert path.exists()
+        assert path.stat().st_size > 100
+        expected = (
+            ArtDirectorAgent.MODERATION_SOFTEN_ATTEMPTS
+            + ArtDirectorAgent.MODERATION_REGEN_ATTEMPTS
+            + 1  # 空镜保底
+        )
+        assert mock_img.run.call_count == expected
+        assert mock_prompt.run_alternate.call_count == ArtDirectorAgent.MODERATION_REGEN_ATTEMPTS
+        assert any(
+            d.get("step") == "moderation_placeholder_seg2" for d in decisions
+        )
 
     @patch("src.agents.art_director.ImageGenTool")
     @patch("src.agents.art_director.PromptGenTool")
@@ -1287,6 +1628,45 @@ class TestAgentPipeline:
         assert len(loaded["segments"]) == 1
         # config 应为当前配置
         assert loaded["config"] is cfg
+
+    @patch("src.agent_pipeline.load_config")
+    def test_load_state_overrides_stale_workspace(self, mock_load_config, tmp_path):
+        """resume 时应使用当前 pipeline workspace，而非 state 里旧路径。"""
+        input_file = tmp_path / "novel.txt"
+        input_file.write_text("内容", encoding="utf-8")
+        ws_new = tmp_path / "ws" / "series" / "ep01"
+        ws_old = tmp_path / "input" / "ws" / "ep01" / "novel"
+        ws_old.mkdir(parents=True)
+        (ws_old / "images").mkdir(parents=True)
+        (ws_old / "images" / "0000.png").write_bytes(b"x" * 200)
+
+        cfg = {
+            "segmenter": {}, "promptgen": {}, "imagegen": {},
+            "tts": {}, "video": {"resolution": [1080, 1920]},
+            "project": {"default_workspace": str(tmp_path / "ws"), "default_output": str(tmp_path / "out")},
+        }
+        mock_load_config.return_value = cfg
+
+        from src.agent_pipeline import AgentPipeline
+
+        pipe = AgentPipeline(
+            input_file=input_file,
+            workspace=ws_new,
+            exact_workspace=True,
+        )
+        pipe.state_file.parent.mkdir(parents=True, exist_ok=True)
+        pipe._save_state({
+            **pipe._init_state(),
+            "workspace": str(ws_old),
+            "images": [str(ws_old / "images" / "0000.png")],
+            "completed_nodes": ["director", "content_analyzer", "art_director"],
+        })
+
+        loaded = pipe._load_state()
+        assert loaded is not None
+        assert loaded["workspace"] == str(ws_new.resolve())
+        assert loaded["images"] == []
+        assert loaded["completed_nodes"] == ["director", "content_analyzer"]
 
     @patch("src.agent_pipeline.load_config")
     def test_load_state_missing_file(self, mock_load_config, tmp_path):

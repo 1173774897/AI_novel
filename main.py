@@ -58,6 +58,281 @@ def run(input_file: str, config: str | None, output: str | None,
         raise click.Abort()
 
 
+@cli.command("batch")
+@click.argument("input_dir", type=click.Path(exists=True, file_okay=False))
+@click.option("--config", "-c", type=click.Path(), default=None, help="配置文件路径")
+@click.option("--output", "-o", type=click.Path(), default=None, help="输出目录")
+@click.option("--workspace", "-w", type=click.Path(), default=None,
+              help="工作目录根路径（各 txt 使用 <workspace>/<文件名>/）")
+@click.option("--resume", "-r", is_flag=True, help="断点续传")
+@click.option("--mode", type=click.Choice(["classic", "agent"]), default="agent",
+              help="运行模式（默认 agent）")
+@click.option("--budget-mode", is_flag=True, help="省钱模式（仅 Agent 模式）")
+@click.option("--quality-threshold", type=float, default=None, help="图片质量阈值")
+@click.option("--pattern", default="*.txt", show_default=True, help="文件匹配模式")
+@click.option("--recursive", is_flag=True, help="递归搜索子目录")
+@click.option("--from", "start_index", type=int, default=None, help="起始序号（从 1 起）")
+@click.option("--to", "end_index", type=int, default=None, help="结束序号（含）")
+@click.option("--from-file", "start_file", default=None, help="起始文件名或 stem")
+@click.option("--to-file", "end_file", default=None, help="结束文件名或 stem")
+@click.option("--continue-on-error", is_flag=True, help="单个失败后继续处理后续文件")
+def batch_run(
+    input_dir: str,
+    config: str | None,
+    output: str | None,
+    workspace: str | None,
+    resume: bool,
+    mode: str,
+    budget_mode: bool,
+    quality_threshold: float | None,
+    pattern: str,
+    recursive: bool,
+    start_index: int | None,
+    end_index: int | None,
+    start_file: str | None,
+    end_file: str | None,
+    continue_on_error: bool,
+):
+    """批量: 目录下所有 txt 依次生成视频"""
+    from src.batch_pipeline import BatchPipeline
+
+    try:
+        pipe = BatchPipeline(
+            Path(input_dir),
+            config_path=Path(config) if config else None,
+            output_dir=Path(output) if output else None,
+            workspace_base=Path(workspace) if workspace else None,
+            resume=resume,
+            mode=mode,
+            budget_mode=budget_mode,
+            quality_threshold=quality_threshold,
+            pattern=pattern,
+            recursive=recursive,
+            start_index=start_index,
+            end_index=end_index,
+            start_file=start_file,
+            end_file=end_file,
+            continue_on_error=continue_on_error,
+        )
+        result = pipe.run()
+        console.print(
+            f"\n[bold green]批量完成: 成功 {len(result.succeeded)}，"
+            f"失败 {len(result.failed)}[/]"
+        )
+        for p in result.succeeded:
+            console.print(f"  [green]✓[/] {p}")
+        for src, err in result.failed:
+            console.print(f"  [red]✗[/] {src.name}: {err[:120]}")
+        if result.failed and not continue_on_error:
+            raise click.Abort()
+    except Exception as e:
+        log.error("批量处理失败: %s", e)
+        raise click.Abort()
+
+
+@cli.group("series")
+def series_cli():
+    """分集系列视频（跨集角色外观一致 + 分集 POV）"""
+    pass
+
+
+@series_cli.command("run")
+@click.argument("series_yaml", type=click.Path(exists=True))
+@click.option("--config", "-c", type=click.Path(), default=None, help="配置文件路径")
+@click.option("--resume", "-r", is_flag=True, help="断点续传")
+@click.option("--budget-mode", is_flag=True, help="省钱模式")
+@click.option("--quality-threshold", type=float, default=None, help="图片质量阈值")
+@click.option("--from-episode", "start_episode", default=None, help="起始分集 id，如 ep03")
+@click.option("--to-episode", "end_episode", default=None, help="结束分集 id，如 ep06")
+def series_run(
+    series_yaml: str,
+    config: str | None,
+    resume: bool,
+    budget_mode: bool,
+    quality_threshold: float | None,
+    start_episode: str | None,
+    end_episode: str | None,
+):
+    """按 series.yaml 顺序生成分集视频，共享 character_registry.json"""
+    from src.series_pipeline import SeriesPipeline
+
+    try:
+        pipe = SeriesPipeline(
+            Path(series_yaml),
+            config_path=Path(config) if config else None,
+            resume=resume,
+            budget_mode=budget_mode,
+            quality_threshold=quality_threshold,
+            start_episode=start_episode,
+            end_episode=end_episode,
+        )
+        results = pipe.run()
+        console.print(f"\n[bold green]系列完成，共 {len(results)} 集：[/]")
+        for p in results:
+            console.print(f"  • {p}")
+    except Exception as e:
+        log.error("系列处理失败: %s", e)
+        raise click.Abort()
+
+
+@series_cli.command("download")
+@click.argument("series_yaml", type=click.Path(exists=True))
+def series_download(series_yaml: str):
+    """从 onehu 下载 series.yaml 中配置的 8 集正文（需 episodes 含 url 字段）"""
+    import yaml
+
+    path = Path(series_yaml)
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    urls = data.get("sources") or {}
+    if not urls:
+        raise click.UsageError("series.yaml 缺少 sources 映射（episode_id → url）")
+
+    from src.onehu_fetch import fetch_article_text
+
+    out_dir = path.parent
+    for ep in data.get("episodes") or []:
+        ep_id = ep.get("id")
+        file_val = ep.get("file")
+        url = urls.get(ep_id)
+        if not url or not file_val:
+            continue
+        out = Path(file_val)
+        if not out.is_absolute():
+            out = Path.cwd() / out
+        log.info("下载 %s …", ep_id)
+        text = fetch_article_text(url)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text + "\n", encoding="utf-8")
+        console.print(f"[green]✓[/] {ep_id} → {out} ({len(text)} 字)")
+
+
+@cli.command("intro")
+@click.argument("workspace_dir", type=click.Path(exists=True))
+@click.option("--text", "-t", default=None, help="片头旁白文案")
+@click.option("--text-file", type=click.Path(exists=True), default=None,
+              help="从文件读取片头文案（UTF-8）")
+@click.option("--config", "-c", type=click.Path(), default=None, help="配置文件路径")
+@click.option("--output", "-o", type=click.Path(), default=None,
+              help="输出 MP4 路径（默认 workspace/<项目名>/intro/intro.mp4）")
+@click.option("--image", "image_indices", multiple=True, type=int,
+              help="指定配图分镜序号，可多次传入（默认按句数取前 N 张）")
+@click.option("--no-split", is_flag=True, help="整段文案不切句，单镜单配音")
+@click.option("--rate", default=None, help="TTS 语速，如 -5%")
+@click.option("--volume", default=None, help="TTS 音量，如 +10%")
+@click.option("--no-tv-frame", is_flag=True,
+              help="跳过电视机框包装，仅输出 Ken Burns 内容视频")
+def intro(
+    workspace_dir: str,
+    text: str | None,
+    text_file: str | None,
+    config: str | None,
+    output: str | None,
+    image_indices: tuple[int, ...],
+    no_split: bool,
+    rate: str | None,
+    volume: str | None,
+    no_tv_frame: bool,
+):
+    """合成片头：TTS + 配图 + FFmpeg 电视机框嵌入 + 关电视片段"""
+    from src.config_manager import load_config
+    from src.intro_video import compose_intro
+
+    if text_file:
+        script = Path(text_file).read_text(encoding="utf-8").strip()
+    elif text:
+        script = text.strip()
+    else:
+        raise click.UsageError("请提供 --text 或 --text-file")
+
+    if not script:
+        raise click.BadParameter("片头文案不能为空")
+
+    try:
+        cfg = load_config(Path(config) if config else None)
+        indices = list(image_indices) if image_indices else None
+        result = compose_intro(
+            workspace=Path(workspace_dir),
+            text=script,
+            config=cfg,
+            output_path=Path(output) if output else None,
+            image_indices=indices,
+            split_sentences=not no_split,
+            rate=rate,
+            volume=volume,
+            tv_frame=not no_tv_frame,
+        )
+        console.print(f"\n[bold green]片头视频已生成: {result}[/]")
+    except Exception as e:
+        log.error("片头合成失败: %s", e)
+        raise click.Abort()
+
+
+@cli.command("ending")
+@click.argument("workspace_dir", type=click.Path(exists=True))
+@click.option("--config", "-c", type=click.Path(), default=None, help="配置文件路径")
+@click.option("--output", "-o", type=click.Path(), default=None,
+              help="输出 MP4 路径（默认 workspace/<项目名>/intro/ending.mp4）")
+@click.option("--rate", default=None, help="TTS 语速，如 -5%")
+@click.option("--volume", default=None, help="TTS 音量，如 +10%")
+@click.option("--no-tv-frame", is_flag=True,
+              help="跳过电视机框包装，仅输出短片+配音")
+def ending(
+    workspace_dir: str,
+    config: str | None,
+    output: str | None,
+    rate: str | None,
+    volume: str | None,
+    no_tv_frame: bool,
+):
+    """合成片尾：感谢短片 + TTS + FFmpeg 电视机框 + 关电视片段"""
+    from src.config_manager import load_config
+    from src.ending_video import compose_ending
+
+    try:
+        cfg = load_config(Path(config) if config else None)
+        result = compose_ending(
+            workspace=Path(workspace_dir),
+            config=cfg,
+            output_path=Path(output) if output else None,
+            rate=rate,
+            volume=volume,
+            tv_frame=not no_tv_frame,
+        )
+        console.print(f"\n[bold green]片尾视频已生成: {result}[/]")
+    except Exception as e:
+        log.error("片尾合成失败: %s", e)
+        raise click.Abort()
+
+
+@cli.command("intro-calibrate")
+@click.option("--config", "-c", type=click.Path(), default=None, help="配置文件路径")
+@click.option("--mask-output", type=click.Path(), default="media/tv-screen-mask.png",
+              help="屏幕蒙版 PNG 输出路径")
+@click.option("--debug-output", type=click.Path(), default="media/tv-screen-calibration.png",
+              help="校准预览图输出路径")
+def intro_calibrate(config: str | None, mask_output: str, debug_output: str):
+    """生成 CRT 屏幕蒙版并在 tv-frame 上输出校准预览图"""
+    from src.config_manager import load_config
+    from src.video.intro_tv_frame import calibrate_intro_tv_screen
+
+    try:
+        cfg = load_config(Path(config) if config else None)
+        mask_path, debug_path = calibrate_intro_tv_screen(
+            cfg,
+            mask_output=Path(mask_output),
+            debug_output=Path(debug_output),
+        )
+        console.print(f"\n[bold green]屏幕蒙版: {mask_path}[/]")
+        console.print(f"[bold green]校准预览: {debug_path}[/]")
+        console.print(
+            "\n[dim]请打开校准预览图，确认绿色区域与 CRT 屏幕内缘对齐；"
+            "若不准，调整 config intro.tv_screen / tv_screen_corner_radius 后重跑。[/]"
+        )
+    except Exception as e:
+        log.error("校准失败: %s", e)
+        raise click.Abort()
+
+
 @cli.command("preview")
 @click.argument("workspace_dir", type=click.Path(exists=True))
 @click.option("--count", "-n", default=2, show_default=True,

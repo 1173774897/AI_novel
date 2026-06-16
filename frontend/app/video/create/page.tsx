@@ -43,14 +43,22 @@ const RATE_OPTIONS = [
 const IMAGE_BACKEND_OPTIONS = [
   { value: "siliconflow", label: "SiliconFlow" },
   { value: "dashscope", label: "阿里云通义" },
+  { value: "jimeng-cli", label: "即梦 CLI (本地)" },
 ] as const;
 
 const IMAGE_BACKEND_DEFAULTS: Record<
   string,
-  { model: string; size?: string }
+  { model: string; size?: string; ratio?: string; resolution?: string }
 > = {
   siliconflow: { model: "black-forest-labs/FLUX.1-schnell" },
   dashscope: { model: "qwen-image-2.0-pro-2026-04-22", size: "928*1664" },
+  "jimeng-cli": {
+    model: "4.5",
+    ratio: "9:16",
+    resolution: "2k",
+    cli_flavor: "dreamina",
+    cli_command: "dreamina",
+  },
 };
 
 const LLM_OPTIONS = [

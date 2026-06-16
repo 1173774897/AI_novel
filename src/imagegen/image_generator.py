@@ -19,12 +19,20 @@ _BACKEND_DEFAULTS: dict[str, dict] = {
         "size": "928*1664",
     },
     "together": {"model": "black-forest-labs/FLUX.1-schnell-Free"},
+    "jimeng-cli": {
+        "model": "4.5",
+        "cli_flavor": "dreamina",
+        "cli_command": "dreamina",
+        "ratio": "9:16",
+        "resolution": "2k",
+    },
 }
 
 _BACKEND_MODEL_PREFIXES: dict[str, tuple[str, ...]] = {
     "dashscope": ("wan", "qwen-image"),
     "siliconflow": ("black-forest-labs/", "stabilityai/", "Pro/", "Kwai-Kolors/"),
     "together": ("black-forest-labs/", "stabilityai/"),
+    "jimeng-cli": ("jimeng-", "nanobanana", "3.", "4.", "5."),
 }
 
 
@@ -36,7 +44,15 @@ def _resolve_imagegen_config(config: dict) -> dict:
 
     resolved = dict(config)
     defaults = _BACKEND_DEFAULTS[backend]
-    model = resolved.get("model", "")
+
+    # YAML 中 model: 4.5 会被解析为 float，统一转为 str
+    raw_model = resolved.get("model", "")
+    if raw_model is not None and raw_model != "":
+        resolved["model"] = str(raw_model).strip()
+    else:
+        resolved["model"] = ""
+
+    model = resolved["model"]
     prefixes = _BACKEND_MODEL_PREFIXES.get(backend, ())
 
     if model and prefixes and not any(model.startswith(p) for p in prefixes):
@@ -52,6 +68,19 @@ def _resolve_imagegen_config(config: dict) -> dict:
 
     if backend == "dashscope" and "size" not in resolved:
         resolved["size"] = defaults.get("size", "928*1664")
+    elif backend == "jimeng-cli":
+        if "ratio" not in resolved:
+            resolved["ratio"] = defaults.get("ratio", "9:16")
+        else:
+            resolved["ratio"] = str(resolved["ratio"]).strip()
+        if "resolution" not in resolved:
+            resolved["resolution"] = defaults.get("resolution", "2k")
+        else:
+            resolved["resolution"] = str(resolved["resolution"]).strip()
+        if "cli_flavor" not in resolved:
+            resolved["cli_flavor"] = defaults.get("cli_flavor", "dreamina")
+        if "cli_command" not in resolved:
+            resolved["cli_command"] = defaults.get("cli_command", "dreamina")
 
     return resolved
 
@@ -102,5 +131,9 @@ def create_image_generator(config: dict) -> ImageGenerator:
         from src.imagegen.dashscope_backend import DashScopeBackend
 
         return DashScopeBackend(config)
+    elif backend == "jimeng-cli":
+        from src.imagegen.jimeng_cli_backend import JimengCliBackend
+
+        return JimengCliBackend(config)
     else:
         raise ValueError(f"Unknown image backend: {backend}")

@@ -25,7 +25,11 @@ segmenter:
 
 # Prompt 生成
 promptgen:
-  style: anime  # 风格预设名
+  style: anime           # 轻松明快的 2D 插画；可选 watercolor / chinese_ink
+  horror_style: off      # off=不追加阴森恐怖约束 | subtle=含蓄恐怖
+  tone: light            # default | light — light=整体更轻松明亮，减少沉重阴郁
+  pov_mode: auto        # auto=第一人称文自动启用 | author=强制叙述者视角 | off=关闭
+  era: 现代             # auto=自动检测 | 古代 | 现代 — 锁定场景/人物时代
   llm:
     model: deepseek-v4-pro  # 与顶层 llm.provider 保持一致
     temperature: 0.7
@@ -55,41 +59,117 @@ promptgen:
 
 # 图片生成
 imagegen:
-  backend: dashscope  # diffusers | together | siliconflow | dashscope
-  model: qwen-image
-  size: "928*1664"   # 9:16 竖屏（qwen-image 推荐）
-  request_interval: 5  # 每张图间隔秒数，避免 429 限流；仍频繁 429 可调到 8-10
-  prompt_extend: false  # 敏感题材务必 false，扩写易触发内容审核
-  negative_prompt: "nsfw, nude, violence, gore, blood, explicit sexual content"
-  width: 1024
-  height: 1792
+  # backend: dashscope  # diffusers | together | siliconflow | dashscope | jimeng-cli
+  # model: qwen-image
+  # size: "928*1664"   # 9:16 竖屏（qwen-image 推荐）
+  # request_interval: 5  # 每张图间隔秒数，避免 429 限流；仍频繁 429 可调到 8-10
+  # prompt_extend: false  # 敏感题材务必 false，扩写易触发内容审核
+  # negative_prompt: "nsfw, nude, violence, gore, blood, explicit sexual content"
+  # width: 1024
+  # height: 1792
+  backend: jimeng-cli
+  cli_flavor: dreamina      # 官方 CLI（默认）
+  cli_command: dreamina     # 可省略，会自动选
+  model: "4.5"              # 务必加引号，否则 YAML 会解析为浮点数
+  ratio: "16:9"    # 标准横屏，最常用
+  # ratio: "21:9"  # 超宽屏
+  # ratio: "3:2"   # 摄影横构图
+  # ratio: "4:3"   # 略宽
+  resolution: 2k
+  timeout: 300
+  prompt_max_chars: 1200  # 即梦 API 超长易报 ret=1046 InvalidNode
+  negative_prompt: "photorealistic, realistic, photo, photograph, live action, hyperrealistic, 3d render, cgi, deformed, blurry, watermark, text, dark, gloomy, oppressive, horror, scary, blood, gore"
   # --- 其他后端（切换时改 backend）---
   # siliconflow: model: black-forest-labs/FLUX.1-schnell
   # wan2.6-t2i:  size: 960*1696
   # diffusers:   model: gsdf/Counterfeit-V2.5, device: auto
   # together:    model: black-forest-labs/FLUX.1-schnell-Free
+  # jimeng-cli: 官方 dreamina CLI（推荐）
+  #              curl -s https://jimeng.jianying.com/cli | bash && dreamina login
+  #              cli_flavor: dreamina   # dreamina(官方) | jimeng(npm社区版)
+  #              cli_command: dreamina   # 留空则按 cli_flavor 自动选择
+  #              model: 4.5              # dreamina 用 model_version；也兼容 jimeng-4.5
+  #              ratio: "9:16"
+  #              resolution: 2k          # dreamina 映射为 resolution_type
+  #              request_interval: 5
+  #              timeout: 300
+  #              output_dir: ""          # dreamina 可留空；jimeng 社区版建议指定
+  #              extra_args: []
+  # npm 社区版: npm install -g jimeng-cli && jimeng login
+  #              cli_flavor: jimeng
+  #              cli_command: jimeng
+  #              model: jimeng-4.5
+  #              region: cn
 
 # TTS 配音
 tts:
-  voice: zh-CN-YunxiNeural
-  rate: "+0%"
-  volume: "+0%"
+  gender: female  # female | female — 切换男/女声
+  voices:
+    male: zh-CN-YunxiNeural       # 云希-男
+    female: zh-CN-XiaoyiNeural  # 晓晓-女
+  # voice: zh-CN-YunjianNeural    # 可选：显式指定 edge-tts voice，覆盖 gender
+  rate: "+18%"   # 全局基准语速；Agent 模式会与 voice_director 情感偏移相加
+  volume: "+0%"  # 全局基准音量；Agent 模式会与情感偏移相加
 
 # 字幕
 subtitle:
   enabled: true   # false = 不生成 SRT、成片不烧字幕（仅保留配音）
+  max_entry_chars: 30  # 单条 SRT 字幕最多字数，超出时在逗号/标点处二次切分
   font_size: 48
   max_lines: 8    # 单条字幕最多显示行数，超出时自动缩小字号
   margin_x: 40    # 左右留白（像素），防止字幕贴边或溢出
-  margin_bottom: 340  # 距画面底部的留白（像素），越大字幕越靠上
+  margin_bottom: 60   # 距画面底部的留白（像素），越大字幕越靠上
   font_color: white
   outline_color: black
   outline_width: 2
   position: bottom  # bottom | center
 
+# 片头（intro 命令）
+intro:
+  enabled: true
+  tv_frame: media/tv-frame.png    # 客厅+CRT 电视静态图
+  tv_frame_ref_size: [1280, 720]  # tv_screen 坐标基准尺寸
+  output_scale: frame              # frame=原图分辨率，避免二次缩放偏移
+  tv_screen:                        # CRT 屏幕区域（相对 tv_frame_ref_size）
+    x: 384                         #减小向左
+    y: 152                         #减小向上
+    w: 504                         #减少变窄
+    h: 384                         #减少变矮
+  tv_screen_mask: media/tv-screen-mask.png   # 屏幕蒙版（可手绘精修）
+  tv_screen_corner_radius: 20      # 自动生蒙版时的圆角（ref 像素）
+  tv_screen_edge_bow:              # 四边外凸，模拟 CRT 玻璃向观众鼓起（ref 像素）
+    top: 8
+    bottom: 8
+    left: 4
+    right: 4
+  tv_screen_mask_feather: 1.5       # 蒙版边缘羽化，抗锯齿
+  content_fit: fill                 # fill=裁切填满屏幕 | contain=留黑边
+  use_screen_mask: true
+  focus_clip: media/关掉杂念故事开始咯.mp4   # 故事介绍后拼接；false 可禁用
+  focus_tagline: "关掉杂念，故事开始咯"        # 口播与 focus_clip 等长对齐
+  tv_speaker_audio:                  # 旁白处理成 CRT 电视扬声器音色
+    enabled: true
+    highpass_hz: 1800                 # 切低频（电视小喇叭）越大越「薄」
+    lowpass_hz: 4800                  # 切高频 越小越「闷」
+    mono: true                        # 折叠单声道再扩成窄立体声
+    volume: 2
+    compress: true                    # 轻微压缩，模拟电视动态
+  pattern: media/intro-pattern.mp4   # 旧版视频模板（已弃用，保留兼容）
+  pattern_audio_volume: 0.0
+  fps: 30
+
+# 片尾（ending 命令）
+ending:
+  clip: media/故事讲完了感谢收听我们下次再见.mp4
+  tagline: "故事讲完了，感谢收听。我们下次再见"   # 口播与 clip 等长对齐
+  shutdown_clip: media/tv-shotdown.mp4  # 电视机框后拼接关电视；false 可禁用
+  shutdown_audio_volume: 0.1            # 关电视片段音量（1.0=原音量，0.5=减半）
+  lead_black_duration: 1.0              # 片尾最前黑屏秒数；0 禁用
+
 # 视频合成
 video:
-  resolution: [1080, 1920]  # 竖屏 9:16
+  auto_resolution: true   # 按 imagegen.ratio 自动设置 resolution（16:9 -> [1920,1080]）
+  resolution: [1920, 1080]  # 横屏 16:9；竖屏用 [1080, 1920]
   fps: 30
   codec: libx265  # libx264(通用) | libx265(推荐,体积小一半) | libsvtav1(最小,兼容性差)
   crf: 18
@@ -108,8 +188,13 @@ agent_chat:
   max_iterations: 20    # 单次对话最大工具调用步数（默认20）
   # max_tokens: 4096    # 单次 LLM 回复最大 token 数
 
-# Agent 模式配置（可选，仅 --mode agent 时生效）
-# agent:
+# # Agent 模式配置（可选，仅 --mode agent 时生效）
+agent:
+  character_review:
+    enabled: true              # 双 AI 讨论审核角色列表（budget 模式自动关闭）
+    reviewer_provider: dashscope  # LLM provider：dashscope | gemini | deepseek 等
+    reviewer_model: qwen3.7-max  # 百炼 Qwen 模型名
+    temperature: 0.2
 #   quality_check:
 #     enabled: true
 #     threshold: 6.0

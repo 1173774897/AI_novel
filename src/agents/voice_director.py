@@ -7,15 +7,17 @@ from pathlib import Path
 from src.agents.state import AgentState, Decision
 from src.agents.utils import make_decision
 from src.tools.tts_tool import TTSTool
+from src.tts.tts_params import combine_percent
 from src.logger import log
 
 
+# Agent 模式下为相对 config.yaml tts.rate/volume 的偏移量（在 TTSTool 中与基准相加）
 EMOTION_TTS_PARAMS = {
     "平静": {"rate": "+0%", "volume": "+0%"},
-    "紧张": {"rate": "+10%", "volume": "+5%"},
-    "悲伤": {"rate": "-15%", "volume": "-5%"},
-    "欢快": {"rate": "+20%", "volume": "+10%"},
-    "激动": {"rate": "+15%", "volume": "+10%"},
+    "紧张": {"rate": "+5%", "volume": "+5%"},
+    "悲伤": {"rate": "+0%", "volume": "+0%"},
+    "欢快": {"rate": "+5%", "volume": "+5%"},
+    "激动": {"rate": "+5%", "volume": "+5%"},
 }
 
 EMOTION_RULES = [
@@ -104,11 +106,20 @@ def voice_director_node(state: AgentState) -> dict:
 
         emotion = agent.analyze_emotion(seg["text"])
         params = agent.get_tts_params(emotion)
+        base_tts = config.get("tts", {})
+        final_rate = combine_percent(base_tts.get("rate", "+0%"), params["rate"])
+        final_volume = combine_percent(
+            base_tts.get("volume", "+0%"), params["volume"]
+        )
 
         decisions.append(make_decision(
             "VoiceDirector",
             f"emotion_seg{i}",
-            f"情感={emotion}, rate={params['rate']}, volume={params['volume']}",
+            (
+                f"情感={emotion}, rate={final_rate} "
+                f"(基准{base_tts.get('rate', '+0%')}+偏移{params['rate']}), "
+                f"volume={final_volume}"
+            ),
             f"文本: {seg['text'][:50]}...",
         ))
 

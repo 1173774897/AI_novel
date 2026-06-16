@@ -36,7 +36,10 @@ imagegen:
   height: 1792
 
 tts:
-  voice: zh-CN-YunxiNeural
+  gender: male
+  voices:
+    male: zh-CN-YunxiNeural
+    female: zh-CN-XiaoxiaoNeural
   rate: "+0%"
   volume: "+0%"
 

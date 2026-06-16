@@ -222,7 +222,7 @@ class DirectorPipeline:
         from src.tts.subtitle_generator import SubtitleGenerator
 
         tts_config = self.config.get("tts", {})
-        sub_gen = SubtitleGenerator()
+        sub_gen = SubtitleGenerator(self.config.get("subtitle", {}))
 
         total = len(script.segments)
         for i, seg in enumerate(script.segments):

@@ -4,7 +4,26 @@ import logging
 import re
 
 from src.promptgen.character_tracker import CharacterTracker
+from src.promptgen.author_pov import (
+    build_author_pov_instruction,
+    build_author_pov_prompt_suffix,
+    detect_first_person_work,
+    narrator_physically_present,
+)
+from src.promptgen.narrator import (
+    build_narrator_instruction_from_identity,
+    build_omit_narrator_instruction,
+    build_omit_narrator_prompt_suffix,
+    build_scene_character_context,
+    resolve_narrator_visual,
+    segment_has_first_person,
+)
 from src.promptgen.style_presets import get_preset
+from src.promptgen.era_context import (
+    CLASSICAL,
+    CLASSICAL_IMAGE_LLM_NOTE,
+    normalize_era,
+)
 
 log = logging.getLogger("novel")
 
@@ -26,8 +45,25 @@ _SYSTEM_PROMPT = """\
    - 角色的职业、身份要体现在服装和动作中
 7. 如果文本中有多个角色互动，prompt 中必须包含所有角色
 
+9. 恐怖/惊悚场景必须「含蓄恐怖」: 用光影、阴影、空旷、雾、冷色调、异常倒影、
+   远处人影、半开门、惊惧眼神营造不安；禁止直接描绘血腥、伤口、尸体、断肢、
+   内脏等露骨画面（no gore, no blood, no corpse, no explicit violence）
+
 输出格式: 仅输出英文 prompt 文本，不要包含任何解释或前缀。
 """
+
+_ANIME_LLM_STYLE_NOTE = (
+    "\n\n画面风格必须为日系动画/插画（anime illustration, 2D cel shading），"
+    "禁止 photorealistic、photo、live action、hyperrealistic、3D render 等写实关键词。"
+)
+
+_PHOTOREALISTIC_TERMS_RE = re.compile(
+    r"\b("
+    r"photorealistic|hyperrealistic|realistic photo|professional photography|"
+    r"live action|photograph|8k photo|dslr|raw photo|cinema still"
+    r")\b",
+    re.IGNORECASE,
+)
 
 # 视频生成 LLM 系统提示词
 _VIDEO_SYSTEM_PROMPT = """\
@@ -56,9 +92,115 @@ _VIDEO_SYSTEM_PROMPT = """\
 6. 末尾添加约束: "Stable character appearance, natural smooth movements, cinematic quality, 4K"
 7. 如果有角色，保持其外观描述一致
 8. 注意视频只有5-10秒，不要描述过多动作，聚焦最核心的一个画面转变
+9. 恐怖/惊悚场景必须「含蓄恐怖」: 心理悬疑与氛围压迫为主，暗示画外威胁；
+   禁止血腥、尸体特写、肢解、喷溅血液等露骨画面（no gore, no blood, no explicit violence）
 
 输出格式: 仅输出英文 prompt 文本，不要包含任何解释或前缀。Prompt 应为 2-4 句完整的英文句子。
 """
+
+# 恐怖片段检测（分镜级）
+_HORROR_SEGMENT_RE = re.compile(
+    r"恐怖|诡异|毛骨悚然|阴森|惊悚|骇人|不寒而栗|怪[异象声影]|"
+    r"鬼|灵异|怨气|诅咒|腐臭|惨叫|噩梦|密[室锁]|悄无声息|阴冷|浮现|扭曲|"
+    r"血[迹腥]?|尸[体形]?|杀[死害]|悬案|纵火|火灾|烧焦"
+)
+
+_HORROR_SUBTLE_IMAGE_SUFFIX = (
+    "subtle psychological horror, implied dread, ominous shadows, "
+    "off-screen tension, cinematic suspense, no gore, no blood, "
+    "no explicit violence"
+)
+
+_HORROR_LLM_USER_NOTE = (
+    "\n\n【恐怖场景】本段含恐怖/惊悚元素，请用含蓄恐怖手法："
+    "光影压迫、空旷阴冷、远处人影、门缝微光、惊惧表情、扭曲倒影；"
+    "不要画血腥伤口、尸体细节、断肢或任何露骨暴力画面。"
+)
+
+_TONE_LIGHT_SUFFIX = (
+    "bright soft daylight or warm indoor lighting, natural vibrant colors, "
+    "high key lighting, clean composition, cheerful everyday mood, "
+    "not dark, not gloomy, not oppressive, not horror atmosphere, "
+    "light storytelling mood"
+)
+
+_TONE_LIGHT_LLM_NOTE = (
+    "\n\n【整体基调·必须遵守】轻松明亮叙事："
+    "画面必须明亮、自然光或柔和暖色室内光，色彩清晰饱和；"
+    "即使悬疑/回忆/冲突段落也禁止大面积暗部、雨夜冷青、低照度电影感、"
+    "阴森压迫或 horror poster 风格。"
+    "目标效果：日常校园/都市生活向 2D 插画，而非写实悬疑电影剧照。"
+)
+
+_TONE_LIGHT_SCENE_OVERRIDES: dict[str, str] = {
+    "late at night, dark atmosphere, dim indoor lighting": (
+        "quiet evening indoor scene, soft warm ambient light, well-lit room"
+    ),
+    "tense atmosphere, unsettling mood": (
+        "calm thoughtful mood, mild curiosity, soft balanced lighting"
+    ),
+    "subtle psychological horror, ominous shadows, uneasy mood, implied dread, no gore": (
+        "quiet mystery mood, soft shadows, curious atmosphere, bright enough to see clearly, no menace"
+    ),
+    "dim unsettling light, shadowy silhouette, off-screen threat, no blood no gore": (
+        "soft indoor light, neutral mood, everyday scene, well lit, no blood no gore"
+    ),
+    "lonely atmosphere, solitary figure": (
+        "quiet moment, single figure, gentle mood, soft natural light"
+    ),
+    "cinematic lighting, dramatic shadows": (
+        "soft even lighting, natural colors, gentle shadows"
+    ),
+    "dark atmosphere, rain, moody": (
+        "overcast daylight, soft diffused light, muted but not dark"
+    ),
+}
+
+# 本段是否含可画成血腥/暴力的描写（排除「捧杀」等比喻）
+_VIOLENT_CONTENT_RE = re.compile(
+    r"血迹|血腥|鲜血|血浆|血渍|血[流红]|"
+    r"尸[体首]?|"
+    r"(?<!捧)杀(?:死|害|人|了)|"
+    r"撞飞|卷入机器|"
+    r"伤口|断肢|残肢|腐臭|"
+    r"刀[子刺砍]?|消防斧|螺丝刀刺|"
+    r"遇害|谋杀|丧命|无头|砍|劈|捅"
+)
+
+_DINING_SCENE_RE = re.compile(
+    r"饭局|组局|吃饭|一块儿吃|聚餐|宴席|酒桌|饭桌|餐厅|饭店|请客|碰杯|席上|点菜"
+)
+
+_GORE_PROMPT_CHUNK_RE = re.compile(
+    r"\b(?:"
+    r"blood(?:stain|splatter|ied|y)?|bloody|"
+    r"gore|gory|"
+    r"corpse|dead body|dead man|dead woman|lifeless body|cadaver|"
+    r"murder(?: scene|ed)?|slaughter|"
+    r"stab(?:bing|bed)?|"
+    r"decapitated|dismembered|mutilated|"
+    r"open wound|severed|"
+    r"blood-soaked|pool of blood|"
+    r"crime scene|massacre"
+    r")\b[^,]*",
+    re.IGNORECASE,
+)
+
+_PEACEFUL_GUARD_SUFFIX = (
+    "peaceful everyday scene, no blood, no gore, no corpse, "
+    "no dead body, no wounds, no violence, clean safe environment"
+)
+
+_DINING_SCENE_SUFFIX = (
+    "restaurant or private dining room, round table with dishes and chopsticks, "
+    "family dinner gathering, warm indoor lighting, social meal scene"
+)
+
+_PEACEFUL_LLM_USER_NOTE = (
+    "\n\n【本段无暴力/血腥描写·必须遵守】"
+    "原文是日常、对话或社交场景；prompt 中禁止出现 blood、gore、corpse、"
+    "dead body、wound、murder scene 等词汇；画面干净、安全，严格贴合本段情节。"
+)
 
 # ---- 视频运镜自动匹配规则 (按优先级排列，第一个匹配即返回) ----
 _CAMERA_MOVEMENT_RULES: list[tuple[str, str]] = [
@@ -142,7 +284,8 @@ _MODERN_RULES: list[tuple[str, str]] = [
     (r"温馨|温暖|幸福|开心", "warm and cozy atmosphere, soft lighting"),
     (r"孤独|一个人|独自", "lonely atmosphere, solitary figure"),
     (r"紧张|心跳加速|不对劲", "tense atmosphere, unsettling mood"),
-    (r"恐怖|诡异|毛骨悚然", "horror atmosphere, eerie lighting"),
+    (r"恐怖|诡异|毛骨悚然", "subtle psychological horror, ominous shadows, uneasy mood, implied dread, no gore"),
+    (r"血[迹腥]?|尸体|腐臭|残肢|断肢|烧焦", "dim unsettling light, shadowy silhouette, off-screen threat, no blood no gore"),
     (r"搞笑|哈哈|莫名其妙", "comedic scene, humorous mood"),
 ]
 
@@ -240,6 +383,8 @@ class PromptGenerator:
 
         self._use_character_tracking: bool = config.get("character_tracking", True)
         self._tracker = CharacterTracker() if self._use_character_tracking else None
+        self._seeded_characters: list[dict] = []
+        self._seeded_names: frozenset[str] = frozenset()
 
         # 检测是否可使用 LLM: 任意已知 API Key 或配置了 provider
         self._llm_config = llm_cfg
@@ -248,49 +393,375 @@ class PromptGenerator:
 
         # 缓存全文的时代判断结果
         self._era_cache: str | None = None
+        self._horror_style: str = str(config.get("horror_style", "subtle")).lower()
+        self._tone: str = str(config.get("tone", "default")).lower()
+        self._pov_mode: str = str(config.get("pov_mode", "auto")).lower()
+        self._pov_narrator_name: str | None = (
+            str(config.get("pov_narrator")).strip()
+            if config.get("pov_narrator")
+            else None
+        )
+        self._first_person_work: bool = False
+        self._era_override: str | None = normalize_era(config.get("era"))
 
+        if self._era_override:
+            log.info("时代背景已锁定: %s", self._era_override)
         if self._use_llm:
             log.info("Prompt 生成: LLM 模式 (model=%s)", self._model)
         else:
             log.info("Prompt 生成: 本地关键词模式 (style=%s)", self._style_name)
 
+    def set_style(self, style_name: str) -> None:
+        """运行时切换风格预设（如 ContentAnalyzer 推荐风格）。"""
+        self._style_name = style_name
+        self._preset = get_preset(style_name)
+
+    def _append_era_llm_note(self, user_msg: str) -> str:
+        if self._get_era("") == CLASSICAL:
+            user_msg += CLASSICAL_IMAGE_LLM_NOTE
+        return user_msg
+
+    def _append_style_llm_note(self, user_msg: str) -> str:
+        if self._style_name == "anime":
+            user_msg += _ANIME_LLM_STYLE_NOTE
+        if self._tone == "light":
+            user_msg += _TONE_LIGHT_LLM_NOTE
+        return user_msg
+
+    def _append_llm_context_notes(self, user_msg: str) -> str:
+        user_msg = self._append_style_llm_note(user_msg)
+        return self._append_era_llm_note(user_msg)
+
     # ------------------------------------------------------------------
     # public
     # ------------------------------------------------------------------
 
+    def set_era(self, era: str | None) -> None:
+        """锁定时代背景（古代/现代），覆盖自动检测。"""
+        self._era_override = normalize_era(era)
+
     def set_full_text(self, full_text: str) -> None:
         """用全文来判断时代背景，缓存结果供所有片段使用。"""
-        self._era_cache = self._detect_era(full_text)
+        if self._era_override:
+            self._era_cache = self._era_override
+        else:
+            self._era_cache = self._detect_era(full_text)
+        self._first_person_work = detect_first_person_work(full_text)
         log.info("检测到文本时代: %s", self._era_cache)
+        if self._pov_mode == "auto" and self._first_person_work:
+            log.info("检测到第一人称叙述为主，启用叙述者有限视角 (pov_mode=auto)")
 
-    def seed_characters(self, characters: list[dict]) -> int:
+    def set_pov_narrator(self, name: str | None) -> None:
+        """指定本集第一人称叙述者（角色名），覆盖自动检测。"""
+        self._pov_narrator_name = str(name).strip() if name else None
+
+    def seed_characters(
+        self,
+        characters: list[dict],
+        *,
+        canonical: bool = False,
+    ) -> int:
         """用 ContentAnalyzer 等外部角色表预填 CharacterTracker。"""
+        self._seeded_characters = [
+            entry for entry in (characters or []) if isinstance(entry, dict)
+        ]
+        self._seeded_names = frozenset(
+            str(entry.get("name", "")).strip()
+            for entry in self._seeded_characters
+            if str(entry.get("name", "")).strip()
+        )
         if not self._tracker or not characters:
             return 0
-        return self._tracker.seed_characters(characters)
+        return self._tracker.seed_characters(characters, canonical=canonical)
 
-    def generate(self, text: str, segment_index: int) -> str:
+    _CAST_DESC_MAX_CHARS = 100
+
+    @staticmethod
+    def _truncate_cast_desc(desc: str, max_chars: int) -> str:
+        desc = (desc or "").strip()
+        if len(desc) <= max_chars:
+            return desc
+        return desc[: max_chars - 1].rstrip() + "…"
+
+    def _resolve_narrator_visual(self) -> tuple[str | None, str]:
+        return resolve_narrator_visual(
+            self._pov_narrator_name, self._seeded_characters
+        )
+
+    def _narrator_has_visual_identity(self) -> bool:
+        name, desc = self._resolve_narrator_visual()
+        return bool(name and desc)
+
+    def _narrator_cast_names(self, text: str) -> list[str]:
+        """第一人称叙述时，仅在有明确身份+外观时注入叙述者。"""
+        name, _ = self._resolve_narrator_visual()
+        if name:
+            return [name]
+        return []
+
+    def _build_cast_bible(self, text: str) -> str:
+        """本段相关角色设定（非全片卡司），避免 prompt 过长触发即梦 InvalidNode。"""
+        names: list[str] = []
+        seen: set[str] = set()
+        for name in self._narrator_cast_names(text) + self._resolve_segment_characters(
+            text
+        ):
+            if name and name not in seen:
+                names.append(name)
+                seen.add(name)
+
+        if not names:
+            return ""
+
+        lines: list[str] = []
+        seeded_order = [
+            str(entry.get("name", "")).strip()
+            for entry in self._seeded_characters
+            if isinstance(entry, dict)
+        ]
+        for name in names:
+            if name not in seeded_order:
+                continue
+            for entry in self._seeded_characters:
+                if not isinstance(entry, dict):
+                    continue
+                entry_name = str(entry.get("name", "")).strip()
+                if entry_name != name:
+                    continue
+                desc = self._truncate_cast_desc(
+                    str(entry.get("desc", "")).strip(),
+                    self._CAST_DESC_MAX_CHARS,
+                )
+                if desc:
+                    lines.append(f"{name}：{desc}")
+                break
+
+        if not lines:
+            return ""
+        return "【本段相关角色，外观保持一致】\n" + "\n".join(lines)
+
+    def _resolve_segment_characters(self, text: str) -> list[str]:
+        """本段应注入外观的角色名（子串匹配 + 正则，限预填白名单）。"""
+        if not self._tracker:
+            return []
+        seeded_order = [
+            str(entry.get("name", "")).strip()
+            for entry in self._seeded_characters
+            if isinstance(entry, dict) and str(entry.get("name", "")).strip()
+        ]
+        return self._tracker.resolve_segment_characters(
+            text,
+            seeded_names=seeded_order or None,
+            allowed_names=self._seeded_names or None,
+        )
+
+    def _uses_author_pov(self, text: str) -> bool:
+        if not self._narrator_has_visual_identity():
+            return False
+        if self._pov_narrator_name:
+            return True
+        if self._pov_mode == "off":
+            return False
+        if self._pov_mode == "author":
+            return True
+        if self._pov_mode == "auto":
+            return self._first_person_work
+        return False
+
+    def _build_character_context(
+        self, text: str, prev_text: str | None = None
+    ) -> tuple[str, str]:
+        """组装角色外观描述与叙述者约束说明。"""
+        narrator_prompt = ""
+        narrator_instruction = ""
+        author_pov = self._uses_author_pov(text)
+
+        if self._seeded_characters:
+            scene_prompt, scene_instruction = "", ""
+            if not author_pov or narrator_physically_present(text):
+                scene_prompt, scene_instruction = build_scene_character_context(
+                    text, prev_text, self._seeded_characters
+                )
+            if scene_instruction:
+                narrator_prompt = scene_prompt
+                narrator_instruction = scene_instruction
+            else:
+                narrator_name, narrator_desc = self._resolve_narrator_visual()
+                if narrator_name and narrator_desc:
+                    _, narrator_instruction = build_narrator_instruction_from_identity(
+                        narrator_name, narrator_desc
+                    )
+                    narrator_prompt = narrator_desc
+                elif segment_has_first_person(text):
+                    narrator_instruction = build_omit_narrator_instruction()
+                    narrator_prompt = ""
+
+        if author_pov:
+            pov_note = build_author_pov_instruction(text)
+            narrator_instruction = (
+                f"{pov_note}\n\n{narrator_instruction}"
+                if narrator_instruction
+                else pov_note
+            )
+
+        parts: list[str] = []
+        cast_bible = self._build_cast_bible(text)
+        if cast_bible:
+            parts.append(cast_bible)
+
+        tracker_prompt = ""
+        if self._tracker:
+            characters = self._resolve_segment_characters(text)
+            tracker_prompt = self._tracker.get_character_prompt(
+                characters,
+                allowed_names=self._seeded_names or None,
+            )
+            if tracker_prompt:
+                parts.append(f"【本段出场角色】{tracker_prompt}")
+
+        if narrator_prompt and narrator_prompt not in tracker_prompt:
+            parts.append(narrator_prompt)
+
+        return "\n\n".join(parts), narrator_instruction
+
+    @staticmethod
+    def _visual_source_text(text: str) -> str:
+        """生图用文本：去掉系列书名/章节标题，避免「暗黑」等元数据污染画面。"""
+        lines = (text or "").splitlines()
+        while lines:
+            ln = lines[0].strip()
+            if not ln:
+                lines.pop(0)
+                continue
+            if re.match(r"^【.+】$", ln):
+                lines.pop(0)
+                continue
+            if (
+                "：" in ln
+                and len(ln) < 45
+                and not ln.startswith("「")
+                and not re.search(r"[。！？!?]", ln)
+            ):
+                lines.pop(0)
+                continue
+            if re.match(r"^\d+\.\s*.+", ln) and len(ln) < 32 and "。" not in ln:
+                lines.pop(0)
+                continue
+            break
+        return "\n".join(lines).strip() or (text or "").strip()
+
+    def generate(
+        self,
+        text: str,
+        segment_index: int,
+        prev_text: str | None = None,
+    ) -> str:
         """将小说文本片段转换为 SD 图片 prompt。"""
         if not text or not text.strip():
             return self._preset.get("prefix", "")
 
-        # 提取角色信息
-        character_prompt = ""
-        if self._tracker:
-            characters = self._tracker.extract_characters(text)
-            character_prompt = self._tracker.get_character_prompt(characters)
+        visual_text = self._visual_source_text(text)
+
+        # 提取角色信息 + 叙述者绑定
+        character_prompt, narrator_instruction = self._build_character_context(
+            text, prev_text=prev_text
+        )
 
         # 根据模式生成 prompt
         if self._use_llm:
-            prompt = self._generate_with_llm(text, character_prompt)
+            prompt = self._generate_with_llm(
+                visual_text,
+                character_prompt,
+                narrator_instruction,
+                prev_text=prev_text,
+            )
         else:
-            prompt = self._generate_local(text, character_prompt)
+            prompt = self._generate_local(
+                visual_text, character_prompt, narrator_instruction
+            )
 
-        # 更新角色追踪器
+        # 更新角色追踪器（仅允许已预填角色名，避免误识别污染）
         if self._tracker:
-            self._tracker.update(text, prompt)
+            self._tracker.update(
+                text,
+                prompt,
+                allowed_names=self._seeded_names or None,
+            )
 
+        prompt = self._apply_subtle_horror(prompt, visual_text)
+        prompt = self._apply_tone(prompt)
+        prompt = self._apply_author_pov(prompt, visual_text)
+        prompt = self._apply_peaceful_scene_guard(prompt, visual_text, prev_text)
         log.debug("段 %d prompt: %s", segment_index, prompt[:80])
+        return prompt
+
+    def generate_alternate(
+        self,
+        text: str,
+        segment_index: int,
+        variant: int = 0,
+        prev_text: str | None = None,
+    ) -> str:
+        """拒稿后换角度重生 prompt（variant 0..2 对应不同构图）。"""
+        from src.imagegen.moderation import alternate_angle_hint
+
+        if not text or not text.strip():
+            return self._preset.get("prefix", "")
+
+        hint_cn, hint_en = alternate_angle_hint(variant)
+        visual_text = self._visual_source_text(text)
+        character_prompt, narrator_instruction = self._build_character_context(
+            text, prev_text=prev_text
+        )
+
+        if self._use_llm:
+            user_msg = f"小说文本:\n{visual_text}"
+            if character_prompt:
+                user_msg += (
+                    f"\n\n已知角色描述（必须严格保持一致，尤其是性别和外观）:\n"
+                    f"{character_prompt}"
+                )
+            user_msg = self._append_narrator_instruction(user_msg, narrator_instruction)
+            user_msg += f"\n\n画面风格: {self._style_name}"
+            user_msg = self._append_llm_context_notes(user_msg)
+            user_msg = self._append_peaceful_llm_note(user_msg, visual_text, prev_text)
+            user_msg += (
+                f"\n\n【换角度重试 #{variant + 1}】{hint_cn}\n"
+                f"Alternate framing (English): {hint_en}. "
+                "PG-13, no gore, no explicit violence."
+            )
+            try:
+                client = self._get_llm_client()
+                response = client.chat(
+                    messages=[
+                        {"role": "system", "content": _SYSTEM_PROMPT},
+                        {"role": "user", "content": user_msg},
+                    ],
+                    temperature=self._temperature,
+                )
+                raw = (response.content or "").strip()
+                if raw:
+                    prompt = raw
+                else:
+                    prompt = self._generate_local(
+                        visual_text, character_prompt, narrator_instruction
+                    )
+            except Exception as exc:
+                log.warning("换角度 LLM prompt 失败 (%s)，回退本地模式", exc)
+                prompt = self._generate_local(
+                    visual_text, character_prompt, narrator_instruction
+                )
+        else:
+            prompt = self._generate_local(
+                visual_text, character_prompt, narrator_instruction
+            )
+
+        prompt = f"{prompt}, {hint_en}"
+        prompt = self._apply_subtle_horror(prompt, visual_text)
+        prompt = self._apply_tone(prompt)
+        prompt = self._apply_author_pov(prompt, visual_text)
+        prompt = self._apply_peaceful_scene_guard(prompt, visual_text, prev_text)
+        log.debug("段 %d 换角度 prompt #%d: %s", segment_index, variant + 1, prompt[:80])
         return prompt
 
     @property
@@ -298,7 +769,12 @@ class PromptGenerator:
         """获取角色追踪器实例（用于外部序列化/恢复）。"""
         return self._tracker
 
-    def generate_video_prompt(self, segment_text: str, segment_index: int) -> str:
+    def generate_video_prompt(
+        self,
+        segment_text: str,
+        segment_index: int,
+        prev_text: str | None = None,
+    ) -> str:
         """将小说文本片段转换为视频生成 AI 的 prompt。
 
         视频 prompt 与图片 prompt 的主要区别:
@@ -317,37 +793,164 @@ class PromptGenerator:
         if not segment_text or not segment_text.strip():
             return ""
 
-        # 提取角色信息
-        character_prompt = ""
-        if self._tracker:
-            characters = self._tracker.extract_characters(segment_text)
-            character_prompt = self._tracker.get_character_prompt(characters)
+        visual_text = self._visual_source_text(segment_text)
+
+        # 提取角色信息 + 叙述者绑定
+        character_prompt, narrator_instruction = self._build_character_context(
+            segment_text, prev_text=prev_text
+        )
 
         # 根据模式生成 prompt
         if self._use_llm:
-            prompt = self._generate_video_with_llm(segment_text, character_prompt)
+            prompt = self._generate_video_with_llm(
+                visual_text,
+                character_prompt,
+                narrator_instruction,
+                prev_text=prev_text,
+            )
         else:
-            prompt = self._generate_video_local(segment_text, character_prompt)
+            prompt = self._generate_video_local(
+                visual_text, character_prompt, narrator_instruction
+            )
 
-        # 更新角色追踪器
+        # 更新角色追踪器（仅允许已预填角色名）
         if self._tracker:
-            self._tracker.update(segment_text, prompt)
+            self._tracker.update(
+                segment_text,
+                prompt,
+                allowed_names=self._seeded_names or None,
+            )
 
+        prompt = self._apply_subtle_horror(prompt, visual_text)
+        prompt = self._apply_tone(prompt)
+        prompt = self._apply_author_pov(prompt, visual_text)
+        prompt = self._apply_peaceful_scene_guard(prompt, visual_text, prev_text)
         log.debug("段 %d video prompt: %s", segment_index, prompt[:80])
         return prompt
+
+    def _apply_author_pov(self, prompt: str, text: str) -> str:
+        if self._uses_author_pov(text):
+            suffix = build_author_pov_prompt_suffix(text)
+            if suffix.lower() in prompt.lower():
+                return prompt
+            return f"{prompt.rstrip(', ')}, {suffix}"
+        if segment_has_first_person(text) and not self._narrator_has_visual_identity():
+            suffix = build_omit_narrator_prompt_suffix()
+            if suffix.lower() in prompt.lower():
+                return prompt
+            return f"{prompt.rstrip(', ')}, {suffix}"
+        return prompt
+
+    def _is_horror_segment(self, text: str) -> bool:
+        return bool(_HORROR_SEGMENT_RE.search(text or ""))
+
+    @staticmethod
+    def _has_violent_content(text: str) -> bool:
+        return bool(_VIOLENT_CONTENT_RE.search(text or ""))
+
+    @staticmethod
+    def _is_dining_scene(text: str, prev_text: str | None = None) -> bool:
+        combined = f"{prev_text or ''}\n{text or ''}"
+        return bool(_DINING_SCENE_RE.search(combined))
+
+    @staticmethod
+    def _sanitize_gore_from_prompt(prompt: str) -> str:
+        if not prompt:
+            return prompt
+        cleaned = _GORE_PROMPT_CHUNK_RE.sub("", prompt)
+        cleaned = re.sub(r",\s*,+", ", ", cleaned)
+        cleaned = re.sub(r"\s{2,}", " ", cleaned)
+        return cleaned.strip(" ,")
+
+    @staticmethod
+    def _suffix_present(prompt: str, suffix: str) -> bool:
+        return suffix.lower() in (prompt or "").lower()
+
+    def _apply_peaceful_scene_guard(
+        self,
+        prompt: str,
+        text: str,
+        prev_text: str | None = None,
+    ) -> str:
+        """非暴力分镜：剥离 prompt 中的血腥词，并追加干净场景约束。"""
+        if self._has_violent_content(text):
+            return prompt
+        out = self._sanitize_gore_from_prompt(prompt)
+        if self._is_dining_scene(text, prev_text):
+            if not self._suffix_present(out, _DINING_SCENE_SUFFIX):
+                out = f"{out.rstrip(', ')}, {_DINING_SCENE_SUFFIX}"
+        if not self._suffix_present(out, _PEACEFUL_GUARD_SUFFIX):
+            out = f"{out.rstrip(', ')}, {_PEACEFUL_GUARD_SUFFIX}"
+        return out
+
+    def _append_peaceful_llm_note(
+        self,
+        user_msg: str,
+        text: str,
+        prev_text: str | None = None,
+    ) -> str:
+        if self._has_violent_content(text):
+            return user_msg
+        user_msg += _PEACEFUL_LLM_USER_NOTE
+        if self._is_dining_scene(text, prev_text):
+            user_msg += (
+                "\n场景提示：本段发生在饭局/聚餐，请画餐厅或包间圆桌用餐，"
+                "不要画客厅、卧室或犯罪现场。"
+            )
+        return user_msg
+
+    def _apply_subtle_horror(self, prompt: str, text: str) -> str:
+        """恐怖分镜追加含蓄恐怖约束，避免模型画出露骨画面。"""
+        if (
+            self._horror_style == "off"
+            or self._tone == "light"
+            or not self._is_horror_segment(text)
+        ):
+            return prompt
+        if _HORROR_SUBTLE_IMAGE_SUFFIX.lower() in prompt.lower():
+            return prompt
+        return f"{prompt.rstrip(', ')}, {_HORROR_SUBTLE_IMAGE_SUFFIX}"
+
+    def _apply_tone(self, prompt: str) -> str:
+        """整体基调修饰（light=更轻松明亮）。"""
+        if self._tone != "light":
+            return prompt
+        out = prompt
+        for heavy, light in _TONE_LIGHT_SCENE_OVERRIDES.items():
+            out = out.replace(heavy, light)
+        if _TONE_LIGHT_SUFFIX.lower() not in out.lower():
+            out = f"{out.rstrip(', ')}, {_TONE_LIGHT_SUFFIX}"
+        return out
 
     # ------------------------------------------------------------------
     # video prompt - LLM mode
     # ------------------------------------------------------------------
 
-    def _generate_video_with_llm(self, text: str, character_prompt: str) -> str:
+    def _append_narrator_instruction(self, user_msg: str, narrator_instruction: str) -> str:
+        if narrator_instruction:
+            user_msg += f"\n\n{narrator_instruction}"
+        return user_msg
+
+    def _generate_video_with_llm(
+        self,
+        text: str,
+        character_prompt: str,
+        narrator_instruction: str = "",
+        *,
+        prev_text: str | None = None,
+    ) -> str:
         """使用 LLM 生成视频 prompt。"""
         try:
             user_msg = f"小说文本:\n{text}"
             if character_prompt:
                 user_msg += f"\n\n已知角色描述（必须严格保持一致，尤其是性别和外观）:\n{character_prompt}"
+            user_msg = self._append_narrator_instruction(user_msg, narrator_instruction)
             user_msg += f"\n\n画面风格: {self._style_name}"
+            user_msg = self._append_llm_context_notes(user_msg)
+            user_msg = self._append_peaceful_llm_note(user_msg, text, prev_text)
             user_msg += "\n\n重要: 仔细分析文中每个角色的性别（他=male, 她=female），确保 prompt 中角色性别正确，不要搞混。"
+            if self._horror_style != "off" and self._tone != "light" and self._is_horror_segment(text):
+                user_msg += _HORROR_LLM_USER_NOTE
 
             client = self._get_llm_client()
             response = client.chat(
@@ -361,7 +964,9 @@ class PromptGenerator:
             raw_prompt = response.content.strip()
             if not raw_prompt:
                 log.warning("LLM 返回空视频 prompt，回退到本地模式")
-                return self._generate_video_local(text, character_prompt)
+                return self._generate_video_local(
+                    text, character_prompt, narrator_instruction
+                )
 
             # 附加视频风格关键词
             prompt = self._apply_video_style(raw_prompt)
@@ -369,13 +974,20 @@ class PromptGenerator:
 
         except Exception as e:
             log.warning("LLM 视频 prompt 生成失败 (%s)，回退到本地模式", e)
-            return self._generate_video_local(text, character_prompt)
+            return self._generate_video_local(
+                text, character_prompt, narrator_instruction
+            )
 
     # ------------------------------------------------------------------
     # video prompt - local fallback mode
     # ------------------------------------------------------------------
 
-    def _generate_video_local(self, text: str, character_prompt: str) -> str:
+    def _generate_video_local(
+        self,
+        text: str,
+        character_prompt: str,
+        narrator_instruction: str = "",
+    ) -> str:
         """使用规则匹配生成视频 prompt（无 API 依赖）。
 
         在图片 prompt 的场景元素基础上，将其改写为自然语言句子，
@@ -481,14 +1093,26 @@ class PromptGenerator:
             self._llm_client_cached = create_llm_client(self._llm_config)
         return self._llm_client_cached
 
-    def _generate_with_llm(self, text: str, character_prompt: str) -> str:
+    def _generate_with_llm(
+        self,
+        text: str,
+        character_prompt: str,
+        narrator_instruction: str = "",
+        *,
+        prev_text: str | None = None,
+    ) -> str:
         """使用 LLM 生成高质量 prompt。"""
         try:
             user_msg = f"小说文本:\n{text}"
             if character_prompt:
                 user_msg += f"\n\n已知角色描述（必须严格保持一致，尤其是性别和外观）:\n{character_prompt}"
+            user_msg = self._append_narrator_instruction(user_msg, narrator_instruction)
             user_msg += f"\n\n画面风格: {self._style_name}"
+            user_msg = self._append_llm_context_notes(user_msg)
+            user_msg = self._append_peaceful_llm_note(user_msg, text, prev_text)
             user_msg += "\n\n重要: 仔细分析文中每个角色的性别（他=male, 她=female），确保 prompt 中角色性别正确，不要搞混。"
+            if self._horror_style != "off" and self._tone != "light" and self._is_horror_segment(text):
+                user_msg += _HORROR_LLM_USER_NOTE
 
             client = self._get_llm_client()
             response = client.chat(
@@ -502,20 +1126,27 @@ class PromptGenerator:
             raw_prompt = response.content.strip()
             if not raw_prompt:
                 log.warning("LLM 返回空 prompt，回退到本地模式")
-                return self._generate_local(text, character_prompt)
+                return self._generate_local(
+                    text, character_prompt, narrator_instruction
+                )
 
             prompt = self._apply_style(raw_prompt)
             return prompt
 
         except Exception as e:
             log.warning("LLM prompt 生成失败 (%s)，回退到本地模式", e)
-            return self._generate_local(text, character_prompt)
+            return self._generate_local(text, character_prompt, narrator_instruction)
 
     # ------------------------------------------------------------------
     # local fallback mode
     # ------------------------------------------------------------------
 
-    def _generate_local(self, text: str, character_prompt: str) -> str:
+    def _generate_local(
+        self,
+        text: str,
+        character_prompt: str,
+        narrator_instruction: str = "",
+    ) -> str:
         """使用场景规则匹配生成 prompt（无 API 依赖）。"""
         era = self._get_era(text)
         scene_parts = self._extract_scene(text, era)
@@ -536,12 +1167,23 @@ class PromptGenerator:
             parts.append(character_prompt)
 
         # 4. 画质提升词
-        parts.append("highly detailed, cinematic composition, dramatic lighting")
+        quality = (
+            "soft natural lighting, clear composition, balanced colors"
+            if self._tone == "light"
+            else "highly detailed, cinematic composition, dramatic lighting"
+        )
+        parts.append(quality)
 
         # 5. 风格正向关键词
         positive = self._preset.get("positive", "")
         if positive:
             parts.append(positive)
+
+        if era == CLASSICAL:
+            parts.append(
+                "ancient China, traditional Chinese architecture, "
+                "historical setting, traditional Chinese costume"
+            )
 
         prompt = ", ".join(parts)
         return prompt
@@ -559,6 +1201,8 @@ class PromptGenerator:
         for pattern, description in rules:
             if re.search(pattern, text) and description not in seen:
                 desc = self._apply_gender(description, gender, era)
+                if self._tone == "light":
+                    desc = _TONE_LIGHT_SCENE_OVERRIDES.get(desc, desc)
                 found.append(desc)
                 seen.add(description)
 
@@ -629,8 +1273,18 @@ class PromptGenerator:
     # ------------------------------------------------------------------
 
     def _apply_style(self, raw_prompt: str) -> str:
-        """将风格预设关键词附加到 prompt 上。"""
-        parts = [raw_prompt.rstrip(", ")]
+        """将风格预设关键词附加到 prompt 上（前缀 + 净化 + 正向后缀）。"""
+        cleaned = raw_prompt.rstrip(", ").strip()
+        if self._style_name == "anime":
+            cleaned = _PHOTOREALISTIC_TERMS_RE.sub("", cleaned)
+            cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ,")
+
+        parts: list[str] = []
+        prefix = self._preset.get("prefix", "")
+        if prefix and prefix.lower() not in cleaned.lower()[:80]:
+            parts.append(prefix)
+        if cleaned:
+            parts.append(cleaned)
 
         positive = self._preset.get("positive", "")
         if positive:

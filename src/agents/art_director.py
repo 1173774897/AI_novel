@@ -1,6 +1,8 @@
 """美术指导 Agent - 图片生成 + 质量控制 + 视频片段生成"""
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from pathlib import Path
 
 from src.agents.state import AgentState, Decision, QualityEvaluation
@@ -26,6 +28,8 @@ def _existing_image_path(img_dir: Path, index: int) -> Path | None:
 
 class ArtDirectorAgent:
     MAX_RETRIES = 3
+    MODERATION_SOFTEN_ATTEMPTS = 3
+    MODERATION_REGEN_ATTEMPTS = 3
     QUALITY_THRESHOLD = 6.0
 
     def __init__(self, config: dict, budget_mode: bool = False):
@@ -43,38 +47,123 @@ class ArtDirectorAgent:
             self._video_gen = VideoGenTool(self.config)
         return self._video_gen
 
+    @staticmethod
+    def _write_fallback_image(out_path: Path) -> None:
+        """即梦多次拒稿时写入暗色占位图，避免整段流水线中断。"""
+        from PIL import Image
+
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (1920, 1080), (18, 20, 28)).save(out_path)
+
     def _run_image_gen_with_moderation_fallback(
         self,
         prompt: str,
         out_path: Path,
         index: int,
         decisions: list[Decision],
+        *,
+        regen_prompt: Callable[[int], str] | None = None,
     ) -> None:
-        """生图；遇云端内容审核则软化 prompt 后重试，避免整流水线失败。"""
+        """生图；不合规时先软化 3 次，再换角度重生 prompt 3 次。"""
         from src.imagegen.dashscope_backend import ContentModerationError
-        from src.imagegen.moderation import soften_image_prompt
+        from src.imagegen.jimeng_cli_backend import JimengGenerationError
+        from src.imagegen.moderation import (
+            _MODERATION_REGEN_ATTEMPTS,
+            _MODERATION_SOFTEN_ATTEMPTS,
+            is_jimeng_retryable_error,
+            minimal_safe_fallback_prompt,
+            soften_image_prompt_for_attempt,
+            truncate_image_prompt_for_jimeng,
+        )
 
-        current = prompt
-        for mod_attempt in range(3):
+        last_detail = ""
+        attempts_used = 0
+
+        def _try_generate(current: str, *, phase: str, step: int) -> bool:
+            nonlocal last_detail, attempts_used
             try:
                 self.image_gen.run(current, out_path)
-                if mod_attempt > 0:
+            except ContentModerationError:
+                last_detail = "content_moderation"
+            except JimengGenerationError as exc:
+                last_detail = exc.reason
+            except RuntimeError as exc:
+                last_detail = str(exc)
+            else:
+                if attempts_used > 0:
                     decisions.append(make_decision(
                         "ArtDirector",
                         f"moderation_fallback_seg{index}",
-                        f"段{index} 内容审核拦截，已用安全 prompt 生成",
-                        f"attempt={mod_attempt}, prompt: {current[:80]}...",
+                        f"段{index} 生图被拒后重试成功 ({phase} #{step + 1})",
+                        f"prompt: {current[:80]}...",
                     ))
+                return True
+
+            attempts_used += 1
+            if not is_jimeng_retryable_error(last_detail):
+                return False
+            log.warning(
+                "[ArtDirector] 段%d 生图不合规 (%s)，%s 重试 (第 %d 次)",
+                index,
+                last_detail[:80],
+                phase,
+                step + 1,
+            )
+            return False
+
+        base_prompt = prompt
+
+        # 阶段 1：原 prompt → 逐次软化（共 3 次）
+        for soften_i in range(_MODERATION_SOFTEN_ATTEMPTS):
+            if soften_i == 0:
+                current = truncate_image_prompt_for_jimeng(base_prompt)
+            else:
+                current = soften_image_prompt_for_attempt(base_prompt, soften_i - 1)
+            if _try_generate(current, phase="软化", step=soften_i):
                 return
-            except ContentModerationError:
-                if mod_attempt >= 2:
-                    raise
-                current = soften_image_prompt(prompt, mod_attempt)
-                log.warning(
-                    "[ArtDirector] 段%d 内容审核拦截，改用安全 prompt (尝试 %d)",
-                    index,
-                    mod_attempt + 1,
-                )
+            if not is_jimeng_retryable_error(last_detail):
+                break
+
+        # 阶段 2：换角度重生 prompt（共 3 次）
+        if regen_prompt is not None:
+            for regen_i in range(_MODERATION_REGEN_ATTEMPTS):
+                if not is_jimeng_retryable_error(last_detail):
+                    break
+                try:
+                    base_prompt = regen_prompt(regen_i)
+                except Exception as exc:
+                    log.warning(
+                        "[ArtDirector] 段%d 换角度 prompt 生成失败: %s",
+                        index,
+                        exc,
+                    )
+                    continue
+                current = truncate_image_prompt_for_jimeng(base_prompt)
+                if _try_generate(current, phase="换角度", step=regen_i):
+                    return
+
+        # 阶段 3：6 次均失败后，通用空镜保底生图（仍失败才写占位图）
+        if is_jimeng_retryable_error(last_detail):
+            current = minimal_safe_fallback_prompt(0)
+            if _try_generate(current, phase="空镜保底", step=0):
+                return
+
+        total = _MODERATION_SOFTEN_ATTEMPTS + (
+            _MODERATION_REGEN_ATTEMPTS if regen_prompt else 0
+        ) + 1
+        log.error(
+            "[ArtDirector] 段%d 生图 %d 次均不合规 (%s)，写入占位图继续流水线",
+            index,
+            total,
+            (last_detail or "unknown")[:120],
+        )
+        self._write_fallback_image(out_path)
+        decisions.append(make_decision(
+            "ArtDirector",
+            f"moderation_placeholder_seg{index}",
+            f"段{index} 拒稿，已用占位图跳过",
+            f"detail={last_detail[:120]}",
+        ))
 
     def _optimize_prompt(
         self,
@@ -103,6 +192,7 @@ class ArtDirectorAgent:
         index: int,
         workspace: Path,
         full_text: str | None = None,
+        prev_text: str | None = None,
     ) -> tuple[Path, float, int, list[Decision]]:
         """生成图片，可选质量控制。返回 (path, score, retries, decisions)"""
         img_dir = Path(workspace) / "images"
@@ -132,7 +222,10 @@ class ArtDirectorAgent:
         while retry_count <= max_retries:
             # 生成 prompt
             prompt = self.prompt_gen.run(
-                text, segment_index=index, full_text=full_text
+                text,
+                segment_index=index,
+                full_text=full_text,
+                prev_text=prev_text,
             )
 
             # 重试时根据上次评估反馈优化 prompt
@@ -145,11 +238,25 @@ class ArtDirectorAgent:
                     prompt[:100],
                 )
 
-            # 生成图片（内容审核拦截时自动软化 prompt 重试）
+            # 生成图片（内容审核：软化 3 次 → 换角度 prompt 3 次）
             suffix = f"_r{retry_count}" if retry_count > 0 else ""
             out_path = img_dir / f"{index:04d}{suffix}.png"
+
+            def _regen_prompt(variant: int) -> str:
+                return self.prompt_gen.run_alternate(
+                    text,
+                    segment_index=index,
+                    full_text=full_text,
+                    prev_text=prev_text,
+                    variant=variant,
+                )
+
             self._run_image_gen_with_moderation_fallback(
-                prompt, out_path, index, decisions
+                prompt,
+                out_path,
+                index,
+                decisions,
+                regen_prompt=_regen_prompt,
             )
 
             if not quality_enabled:
@@ -261,8 +368,43 @@ def art_director_node(state: AgentState) -> dict:
     decisions.append(make_decision(
         "ArtDirector", "start",
         f"开始生成 {len(segments)} 张图片",
-        f"风格={state.get('suggested_style', 'default')}",
+        f"风格={config.get('promptgen', {}).get('style') or state.get('suggested_style', 'default')}",
     ))
+
+    suggested_style = state.get("suggested_style")
+    config_style = config.get("promptgen", {}).get("style")
+    style = config_style or suggested_style
+    if style:
+        agent.prompt_gen.set_style(style)
+
+    pov_narrator = state.get("pov_narrator")
+    if pov_narrator:
+        agent.prompt_gen.set_pov_narrator(pov_narrator)
+
+    era_override = state.get("era_override") or config.get("promptgen", {}).get("era")
+    if era_override:
+        agent.prompt_gen.set_era(era_override)
+
+    registry_path = state.get("series_registry_path")
+    if registry_path:
+        from src.promptgen.character_registry import CharacterRegistry
+        from src.promptgen.era_context import CLASSICAL, normalize_era, sanitize_classical_desc
+
+        registry = CharacterRegistry.load(Path(registry_path))
+        canonical = registry.to_seed_list()
+        if era_override and normalize_era(era_override) == CLASSICAL:
+            canonical = [
+                {**entry, "desc": sanitize_classical_desc(entry.get("desc", ""))}
+                for entry in canonical
+            ]
+        if canonical:
+            seeded = agent.prompt_gen.seed_characters(canonical, canonical=True)
+            if seeded:
+                decisions.append(make_decision(
+                    "ArtDirector", "series_registry_seed",
+                    f"系列注册表预填 {seeded} 个角色外观",
+                    str(registry_path),
+                ))
 
     characters = state.get("characters") or []
     if characters:
@@ -291,8 +433,13 @@ def art_director_node(state: AgentState) -> dict:
             )
             continue
 
+        prev_text = segments[i - 1]["text"] if i > 0 else None
         path, score, retries, seg_decisions = agent.generate_image(
-            seg["text"], i, Path(workspace), full_text=full_text
+            seg["text"],
+            i,
+            Path(workspace),
+            full_text=full_text,
+            prev_text=prev_text,
         )
         images.append(str(path))
         quality_scores.append(score)
@@ -311,6 +458,23 @@ def art_director_node(state: AgentState) -> dict:
     # 汇总
     valid_scores = [s for s in quality_scores if s >= 0]
     avg_score = sum(valid_scores) / len(valid_scores) if valid_scores else -1
+
+    if registry_path:
+        from src.promptgen.character_registry import CharacterRegistry
+
+        tracker = agent.prompt_gen._get_gen().character_tracker
+        if tracker is not None:
+            registry = CharacterRegistry.load(Path(registry_path))
+            merged = registry.merge_tracker(
+                tracker, episode=state.get("episode_id")
+            )
+            registry.save()
+            if merged:
+                decisions.append(make_decision(
+                    "ArtDirector", "series_registry_update",
+                    f"回写系列角色表 +{merged} 条",
+                    str(registry_path),
+                ))
 
     decisions.append(make_decision(
         "ArtDirector", "summary",

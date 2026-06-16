@@ -177,16 +177,16 @@ class CharacterTracker:
         characters = list(candidates.keys())
         return characters
 
-    def seed_characters(self, characters: list[dict[str, Any]]) -> int:
+    def seed_characters(
+        self,
+        characters: list[dict[str, Any]],
+        *,
+        canonical: bool = False,
+    ) -> int:
         """用外部角色表预填外观描述（如 ContentAnalyzer 提取结果）。
 
-        仅在角色尚无描述时写入，保持与 update() 相同的「首次描述优先」策略。
-
-        Args:
-            characters: [{"name": "张三", "desc": "..."}, ...]
-
-        Returns:
-            实际写入的角色数量。
+        canonical=True 时强制写入/覆盖（用于系列注册表 canonical 描述）。
+        默认仅在角色尚无描述时写入。
         """
         if not characters:
             return 0
@@ -199,19 +199,27 @@ class CharacterTracker:
             desc = str(entry.get("desc", "")).strip()
             if not name or not desc:
                 continue
-            if name in self._characters:
+            if canonical or name not in self._characters:
+                if self._characters.get(name) != desc:
+                    self._characters[name] = desc
+                    seeded += 1
+                    log.info("[CharacterTracker] 角色 %s: %s", name, desc)
+            elif name in self._characters:
                 continue
-            self._characters[name] = desc
-            seeded += 1
-            log.info("[CharacterTracker] 角色 %s: %s", name, desc)
 
         return seeded
 
-    def get_character_prompt(self, characters: list[str]) -> str:
+    def get_character_prompt(
+        self,
+        characters: list[str],
+        *,
+        allowed_names: frozenset[str] | None = None,
+    ) -> str:
         """为已知角色生成描述性 prompt 片段。
 
         Args:
             characters: 角色名列表。
+            allowed_names: 若提供，仅使用白名单内的角色名。
 
         Returns:
             英文描述字符串，用于拼接到 SD prompt 中。
@@ -221,6 +229,8 @@ class CharacterTracker:
         seen: set[str] = set()
 
         for name in characters:
+            if allowed_names is not None and name not in allowed_names:
+                continue
             if name in self._characters and self._characters[name]:
                 desc = self._characters[name]
                 if desc not in seen:
@@ -229,7 +239,51 @@ class CharacterTracker:
 
         return ", ".join(descriptions)
 
-    def update(self, text: str, prompt: str) -> None:
+    def resolve_segment_characters(
+        self,
+        text: str,
+        *,
+        seeded_names: list[str] | None = None,
+        allowed_names: frozenset[str] | None = None,
+    ) -> list[str]:
+        """合并预填角色名的子串匹配与正则提取，得到本段应注入外观的角色列表。
+
+        预填名优先按 ``seeded_names`` 顺序；子串匹配可覆盖「张得胜专注地…」等
+        正则漏识别的写法。
+        """
+        if not text or not text.strip():
+            return []
+
+        found: list[str] = []
+        seen: set[str] = set()
+
+        if seeded_names:
+            for name in seeded_names:
+                name = str(name).strip()
+                if not name or name in seen:
+                    continue
+                if allowed_names is not None and name not in allowed_names:
+                    continue
+                if name in text:
+                    found.append(name)
+                    seen.add(name)
+
+        for name in self.extract_characters(text):
+            if allowed_names is not None and name not in allowed_names:
+                continue
+            if name not in seen:
+                found.append(name)
+                seen.add(name)
+
+        return found
+
+    def update(
+        self,
+        text: str,
+        prompt: str,
+        *,
+        allowed_names: frozenset[str] | None = None,
+    ) -> None:
         """从生成的 prompt 中学习角色外观描述。
 
         将文本中出现的角色名与 prompt 中的人物描述关联起来。
@@ -242,6 +296,10 @@ class CharacterTracker:
         characters = self.extract_characters(text)
         if not characters:
             return
+        if allowed_names is not None:
+            characters = [name for name in characters if name in allowed_names]
+            if not characters:
+                return
 
         # 从 prompt 中提取人物描述片段
         desc_matches = _DESCRIPTION_PATTERN.findall(prompt)

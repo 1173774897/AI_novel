@@ -415,7 +415,8 @@ class TestVideoAssemblerSubtitleEscaping:
             "1\n00:00:00,000 --> 00:00:02,000\n测试字幕\n",
             encoding="utf-8",
         )
-        with patch.object(assembler, "_has_subtitles_filter", return_value=True):
+        with patch.object(assembler, "_has_drawtext_filter", return_value=False), \
+             patch.object(assembler, "_has_subtitles_filter", return_value=True):
             parts = assembler._build_segment_video_filter_parts(
                 srt_path, duration=5.0, idx=0,
             )
@@ -424,6 +425,38 @@ class TestVideoAssemblerSubtitleEscaping:
         sub_idx = chain.find("subtitles")
         assert zoom_idx >= 0
         assert sub_idx > zoom_idx
+
+    def test_subtitle_overlay_prefers_drawtext_for_fixed_bottom(self, tmp_path):
+        """drawtext 可用时应优先于 libass，保证底边对齐。"""
+        from unittest.mock import patch
+
+        assembler = self._make_assembler(tmp_path)
+        srt_path = tmp_path / "0000.srt"
+        srt_path.write_text(
+            "1\n00:00:00,000 --> 00:00:02,000\n测试字幕\n",
+            encoding="utf-8",
+        )
+        with patch.object(assembler, "_has_drawtext_filter", return_value=True), \
+             patch.object(assembler, "_has_subtitles_filter", return_value=True):
+            filters = assembler._subtitle_overlay_filters(srt_path)
+        assert len(filters) >= 1
+        assert filters[0].startswith("drawtext=")
+        assert "subtitles=" not in filters[0]
+
+    def test_write_sanitized_srt_strips_embedded_newlines(self, tmp_path):
+        """写入 libass 用 SRT 时应去掉条目内换行。"""
+        from src.video.video_assembler import VideoAssembler
+
+        src = tmp_path / "raw.srt"
+        src.write_text(
+            "1\n00:00:00,000 --> 00:00:02,000\n第一行\n第二行\n\n",
+            encoding="utf-8",
+        )
+        dest = tmp_path / "clean.srt"
+        VideoAssembler._write_sanitized_srt(src, dest)
+        content = dest.read_text(encoding="utf-8")
+        assert "第一行 第二行" in content
+        assert "第一行\n第二行" not in content
 
     def test_subtitle_overlay_filters_empty_when_no_ffmpeg_subtitle_support(
         self, tmp_path,
@@ -448,19 +481,68 @@ class TestVideoAssemblerSubtitleEscaping:
         low = VideoAssembler(
             {"resolution": [1080, 1920], "fps": 30, "codec": "libx264"},
             workspace=tmp_path / "low",
-            subtitle_config={"font_size": 38, "margin_bottom": 80},
+            subtitle_config={"font_size": 38, "margin_bottom": 80, "max_lines": 4},
         )
         high = VideoAssembler(
             {"resolution": [1080, 1920], "fps": 30, "codec": "libx264"},
             workspace=tmp_path / "high",
-            subtitle_config={"font_size": 38, "margin_bottom": 200},
+            subtitle_config={"font_size": 38, "margin_bottom": 200, "max_lines": 4},
         )
-        text = "测试字幕位置"
-        lines_low, size_low = low._layout_subtitle_lines(text)
-        lines_high, size_high = high._layout_subtitle_lines(text)
-        y_low = 1920 - len(lines_low) * (size_low + 12) - low.subtitle_margin_bottom
-        y_high = 1920 - len(lines_high) * (size_high + 12) - high.subtitle_margin_bottom
+        y_low = low._subtitle_y_base(1920)
+        y_high = high._subtitle_y_base(1920)
         assert y_high < y_low
+
+    def test_normalize_subtitle_text_strips_newlines(self):
+        from src.video.video_assembler import _normalize_subtitle_text
+
+        assert _normalize_subtitle_text("第一行\n第二行") == "第一行 第二行"
+        assert _normalize_subtitle_text("a\r\nb\rc") == "a b c"
+        assert _normalize_subtitle_text("  多余   空格  ") == "多余 空格"
+
+    def test_parse_srt_multiline_entry_normalizes_text(self, tmp_path):
+        from src.video.video_assembler import VideoAssembler
+
+        assembler = self._make_assembler(tmp_path)
+        srt_path = tmp_path / "multi.srt"
+        srt_path.write_text(
+            "1\n00:00:00,000 --> 00:00:02,000\n第一行\n第二行\n\n",
+            encoding="utf-8",
+        )
+        entries = assembler._parse_srt_entries(srt_path)
+        assert len(entries) == 1
+        assert entries[0]["text"] == "第一行 第二行"
+
+    def test_subtitle_bottom_line_same_y_for_different_line_counts(self, tmp_path):
+        """单行与多行字幕的底行应落在同一垂直位置。"""
+        from src.video.video_assembler import VideoAssembler
+
+        assembler = VideoAssembler(
+            {"resolution": [1080, 1920], "fps": 30, "codec": "libx264"},
+            workspace=tmp_path,
+            subtitle_config={
+                "font_size": 48,
+                "max_lines": 4,
+                "margin_bottom": 60,
+            },
+        )
+        short_lines, _ = assembler._layout_subtitle_lines("短字幕")
+        long_lines, _ = assembler._layout_subtitle_lines(
+            "这是一段比较长的字幕内容，需要自动换行到多行显示"
+        )
+        slot = assembler._subtitle_slot_height()
+        y_base = assembler._subtitle_y_base(1920)
+        short_bottom = (
+            y_base
+            + (assembler.subtitle_max_lines - len(short_lines)) * slot
+            + (len(short_lines) - 1) * slot
+        )
+        long_bottom = (
+            y_base
+            + (assembler.subtitle_max_lines - len(long_lines)) * slot
+            + (len(long_lines) - 1) * slot
+        )
+        assert short_bottom == long_bottom
+        assert len(long_lines) > 1
 
     def test_render_subtitle_overlay_png_full_frame_transparent(self, tmp_path):
         """PNG overlay 回退应生成全画幅透明底字幕层。"""

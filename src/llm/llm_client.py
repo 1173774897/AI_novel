@@ -58,6 +58,10 @@ def _detect_provider() -> tuple[str, dict]:
         log.info("自动检测 LLM: 使用 deepseek provider")
         return "deepseek", {}
 
+    if os.environ.get("DASHSCOPE_API_KEY"):
+        log.info("自动检测 LLM: 使用 dashscope provider")
+        return "dashscope", {}
+
     if os.environ.get("SILICONFLOW_API_KEY"):
         log.info("自动检测 LLM: 使用 siliconflow provider")
         return "siliconflow", {}
@@ -88,7 +92,7 @@ def _detect_provider() -> tuple[str, dict]:
 
     raise RuntimeError(
         "未找到可用的 LLM provider。请设置以下环境变量之一: "
-        "GEMINI_API_KEY, DEEPSEEK_API_KEY, SILICONFLOW_API_KEY, OPENAI_API_KEY, MOONSHOT_API_KEY, ZHIPU_API_KEY，"
+        "GEMINI_API_KEY, DEEPSEEK_API_KEY, DASHSCOPE_API_KEY, SILICONFLOW_API_KEY, OPENAI_API_KEY, MOONSHOT_API_KEY, ZHIPU_API_KEY，"
         "或启动本地 Ollama 服务。"
     )
 
@@ -96,6 +100,7 @@ def _detect_provider() -> tuple[str, dict]:
 _PROVIDER_DEFAULT_MODEL: dict[str, str] = {
     "openai": "gpt-4o-mini",
     "deepseek": "deepseek-chat",
+    "dashscope": "qwen-plus",
     "siliconflow": "zai-org/GLM-4.6",
     "kimi": "moonshot-v1-auto",
     "zhipu": "glm-4.6",
@@ -106,6 +111,7 @@ _PROVIDER_DEFAULT_MODEL: dict[str, str] = {
 _PROVIDER_MODEL_PREFIXES: dict[str, tuple[str, ...]] = {
     "openai": ("gpt-", "o1", "o3", "o4", "chatgpt-"),
     "deepseek": ("deepseek",),
+    "dashscope": ("qwen", "deepseek", "glm-", "Moonshot", "Kimi"),
     "siliconflow": ("zai-org/", "deepseek", "Qwen/", "meta-llama/", "THUDM/"),
     "kimi": ("moonshot", "kimi"),
     "zhipu": ("glm-",),
@@ -143,7 +149,7 @@ def create_llm_client(config: dict | None = None) -> LLMClient:
 
     Args:
         config: LLM 配置字典，可包含 provider, model, api_key 等字段。
-                provider 支持: auto, openai, deepseek, gemini, ollama, siliconflow, kimi, zhipu。
+                provider 支持: auto, openai, deepseek, gemini, ollama, siliconflow, kimi, zhipu, dashscope。
 
     Returns:
         对应后端的 LLMClient 实例。
@@ -245,6 +251,21 @@ def _create_for_provider(provider: str, config: dict) -> "LLMClient":
             "model": "glm-4.6",
         }
         merged = {**zhipu_defaults}
+        for k, v in config.items():
+            if v is not None:
+                merged[k] = v
+        return OpenAIBackend(merged)
+
+    if provider == "dashscope":
+        # 阿里云百炼 OpenAI 兼容 Chat Completions（Qwen 等）
+        from src.llm.openai_backend import OpenAIBackend
+
+        dashscope_defaults = {
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "api_key_env": "DASHSCOPE_API_KEY",
+            "model": "qwen-plus",
+        }
+        merged = {**dashscope_defaults}
         for k, v in config.items():
             if v is not None:
                 merged[k] = v

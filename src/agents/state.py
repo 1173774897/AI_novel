@@ -41,6 +41,14 @@ class AgentState(TypedDict, total=False):
     era: str | None
     characters: list[dict] | None
     suggested_style: str | None
+    intro_variants: list[str] | None  # ContentAnalyzer 生成的约 20 字故事介绍（3 条）
+
+    # 分集系列
+    series_registry_path: str | None
+    episode_id: str | int | None
+    pov_narrator: str | None
+    output_video: str | None
+    era_override: str | None
 
     # 各阶段结果
     segments: list[dict]
