@@ -1,11 +1,17 @@
 """配置管理 - 加载和验证 YAML 配置"""
 
+from __future__ import annotations
+
+import copy
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+
 import yaml
 
 from src.logger import log
 from src.tts.voices import apply_tts_voice
+
+PipelineMode = Literal["agent", "director"]
 
 _DEFAULT_CONFIG = Path(__file__).resolve().parent.parent / "config.yaml"
 
@@ -70,6 +76,95 @@ def _apply_video_resolution_from_imagegen(cfg: dict) -> None:
             current,
             mapped,
         )
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    """递归合并 override 到 base 副本。"""
+    result = dict(base)
+    for key, value in override.items():
+        if (
+            key in result
+            and isinstance(result[key], dict)
+            and isinstance(value, dict)
+        ):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def get_mode_videogen(cfg: dict[str, Any], mode: PipelineMode) -> dict[str, Any]:
+    """按流水线模式读取 videogen 配置（agent 与 director 互不共用）。
+
+    - ``director``：仅 ``director.videogen``
+    - ``agent``：``agent.videogen``；若无则兼容顶层 ``videogen``（弃用警告）
+    """
+    if mode == "director":
+        section = cfg.get("director") or {}
+        vg = section.get("videogen")
+        return dict(vg) if isinstance(vg, dict) else {}
+
+    agent_section = cfg.get("agent") or {}
+    agent_vg = agent_section.get("videogen")
+    if isinstance(agent_vg, dict) and agent_vg.get("backend"):
+        return dict(agent_vg)
+
+    root_vg = cfg.get("videogen")
+    if isinstance(root_vg, dict) and root_vg.get("backend"):
+        log.warning(
+            "顶层 videogen 仅对 run/agent 生效且已弃用，请迁移到 agent.videogen；"
+            "create-video 请使用 director.videogen"
+        )
+        return dict(root_vg)
+
+    return {}
+
+
+def resolve_pipeline_config(
+    cfg: dict[str, Any], mode: PipelineMode
+) -> dict[str, Any]:
+    """解析某条流水线可用的运行时配置（隔离 videogen / 可选模块覆盖）。
+
+    共用：llm、segmenter、promptgen、tts 等顶层字段。
+    隔离：``videogen`` 按模式写入；``director.imagegen`` / ``director.video`` 可覆盖顶层。
+    """
+    resolved = copy.deepcopy(cfg)
+    section_key = "director" if mode == "director" else "agent"
+    section = cfg.get(section_key) or {}
+    if not isinstance(section, dict):
+        section = {}
+
+    resolved["videogen"] = get_mode_videogen(cfg, mode)
+
+    if isinstance(section.get("imagegen"), dict):
+        resolved["imagegen"] = _deep_merge(
+            resolved.get("imagegen") or {}, section["imagegen"]
+        )
+    if isinstance(section.get("video"), dict):
+        resolved["video"] = _deep_merge(
+            resolved.get("video") or {}, section["video"]
+        )
+    if isinstance(section.get("tts"), dict):
+        resolved["tts"] = _deep_merge(resolved.get("tts") or {}, section["tts"])
+
+    _apply_video_resolution_from_imagegen(resolved)
+    apply_tts_voice(resolved)
+    return resolved
+
+
+def resolve_v2v_replace_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    """v2v 角色替换：共用 director 的 imagegen/videogen，并读取 v2v_replace 段。"""
+    resolved = resolve_pipeline_config(cfg, "director")
+    v2v = cfg.get("v2v_replace")
+    if isinstance(v2v, dict):
+        resolved["v2v_replace"] = dict(v2v)
+        if isinstance(v2v.get("videogen"), dict):
+            resolved["videogen"] = _deep_merge(
+                resolved.get("videogen") or {}, v2v["videogen"]
+            )
+    else:
+        resolved["v2v_replace"] = {}
+    return resolved
 
 
 def load_config(path: Path | str | None = None) -> dict[str, Any]:

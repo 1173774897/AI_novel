@@ -9,7 +9,7 @@ from typing import Callable
 from src.agent_state_repair import dedupe_completed_nodes, repair_agent_state_data
 from src.agents.state import AgentState
 from src.agents.utils import save_decisions_to_file
-from src.config_manager import load_config
+from src.config_manager import load_config, resolve_pipeline_config
 from src.logger import log
 
 
@@ -44,7 +44,7 @@ class AgentPipeline:
             from src.pipeline import _deep_merge
 
             base_cfg = _deep_merge(base_cfg, config)
-        self.cfg = base_cfg
+        self.cfg = resolve_pipeline_config(base_cfg, "agent")
 
         # 覆盖质量阈值
         if quality_threshold is not None:

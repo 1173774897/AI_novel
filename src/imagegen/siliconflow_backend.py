@@ -4,6 +4,7 @@ import io
 import logging
 import os
 import time
+from typing import Any
 
 from PIL import Image
 
@@ -57,7 +58,7 @@ class SiliconFlowBackend(ImageGenerator):
     def __del__(self):
         self.close()
 
-    def generate(self, prompt: str) -> Image.Image:
+    def generate(self, prompt: str, **kwargs: Any) -> Image.Image:
         """调用 SiliconFlow API 生成图片并下载，遇到 429 自动重试。"""
         client = self._get_client()
 

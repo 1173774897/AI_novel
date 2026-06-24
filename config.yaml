@@ -36,30 +36,36 @@ promptgen:
   character_tracking: true
 
 # AI 视频片段生成（可选，不配置则使用静态图+Ken Burns模式）
+# run / agent 与 create-video 使用独立配置，互不共用：
+#
+# agent:
+#   videogen:
+#     backend: kling        # kling | seedance | minimax | sora
+#     duration: 5
+#     aspect_ratio: "16:9"
+#     use_image_as_first_frame: true
+#
+# director:
+#   videogen:
+#     backend: jimeng-cli   # create-video 推荐：复用 dreamina login，无需 API Key
+#     cli_flavor: dreamina
+#     cli_command: dreamina
+#     model_version: seedance2.0fast
+#     ratio: "16:9"
+#     video_resolution: 720p
+#     duration: 5
+#     use_image_as_first_frame: true
+#   # 也可 backend: seedance（火山方舟 REST API，需 SEEDANCE_API_KEY）
+#   # imagegen: {}          # 可选，覆盖顶层 imagegen（仅 create-video）
+#   # video: {}             # 可选，覆盖顶层 video（仅 create-video）
+#
+# 兼容：顶层 videogen 仍对 run/agent 生效（已弃用，请迁移到 agent.videogen）
 # videogen:
-#   backend: kling        # kling | seedance | minimax | sora
-#   duration: 5           # 视频时长（秒）
-#   aspect_ratio: "9:16"  # 竖屏
-#   mode: std             # std | pro (仅kling)
-#   use_image_as_first_frame: true  # 用图片生成的结果作为视频首帧
-#   poll_interval: 10     # 轮询间隔（秒）
-#   poll_timeout: 300     # 轮询超时（秒）
-#   # --- 可灵 Kling (backend: kling) ---
-#   # model: kling-v2-6
-#   # --- 即梦 Seedance (backend: seedance) ---
-#   # model: seedance-2.0
-#   # resolution: 1080p
-#   # --- MiniMax 海螺 (backend: minimax) ---
-#   # model: MiniMax-Hailuo-02
-#   # resolution: 720P
-#   # --- OpenAI Sora (backend: sora) ---
-#   # model: sora-2          # sora-2 | sora-2-pro
-#   # size: 1024x1792        # 竖屏 9:16
-#   # 使用 OPENAI_API_KEY
+#   backend: kling
 
 # 图片生成
 imagegen:
-  # backend: dashscope  # diffusers | together | siliconflow | dashscope | jimeng-cli
+  # backend: dashscope  # diffusers | together | siliconflow | dashscope | jimeng-cli | comfyui
   # model: qwen-image
   # size: "928*1664"   # 9:16 竖屏（qwen-image 推荐）
   # request_interval: 5  # 每张图间隔秒数，避免 429 限流；仍频繁 429 可调到 8-10
@@ -67,18 +73,35 @@ imagegen:
   # negative_prompt: "nsfw, nude, violence, gore, blood, explicit sexual content"
   # width: 1024
   # height: 1792
-  backend: jimeng-cli
-  cli_flavor: dreamina      # 官方 CLI（默认）
-  cli_command: dreamina     # 可省略，会自动选
-  model: "4.5"              # 务必加引号，否则 YAML 会解析为浮点数
+  # backend: jimeng-cli
+  # cli_flavor: dreamina      # 官方 CLI（默认）
+  # cli_command: dreamina     # 可省略，会自动选
+  # model: "4.5"              # 务必加引号，否则 YAML 会解析为浮点数
   ratio: "16:9"    # 标准横屏，最常用
   # ratio: "21:9"  # 超宽屏
   # ratio: "3:2"   # 摄影横构图
   # ratio: "4:3"   # 略宽
   resolution: 2k
-  timeout: 300
   prompt_max_chars: 1200  # 即梦 API 超长易报 ret=1046 InvalidNode
-  negative_prompt: "photorealistic, realistic, photo, photograph, live action, hyperrealistic, 3d render, cgi, deformed, blurry, watermark, text, dark, gloomy, oppressive, horror, scary, blood, gore"
+  # --- ComfyUI 本地生图（run / agent / create-video 等所有模式共用）---
+  backend: comfyui
+  base_url: http://127.0.0.1:8188
+  workflow: workflows/comfyui/fluxscale_workflow.json
+  width: 960           # EmptyLatentImage；经 VAEDecodeTiled + 4xUltrasharp 约 2560×1452
+  height: 544
+  ratio: "16:9"
+  steps: 20
+  steps_multi_person: 30   # 本段可见角色 > multi_person_threshold 时使用
+  multi_person_threshold: 1
+  lora_trigger: YuanRun    # YR_flux_lora_v1 唤醒词，自动前缀到 positive prompt
+  prompt_prefix: "beautiful anime illustration of"
+  timeout: 1200             # ComfyUI 轮询超时 10 分钟（秒）
+  output_node: "9"     # SaveImage 节点
+  node_map:
+    positive: "6"      # CLIPTextEncode
+    latent: "5"        # EmptyLatentImage
+    noise: "17"        # RandomNoise.noise_seed
+    scheduler: "19"    # BasicScheduler.steps
   # --- 其他后端（切换时改 backend）---
   # siliconflow: model: black-forest-labs/FLUX.1-schnell
   # wan2.6-t2i:  size: 960*1696
@@ -106,9 +129,9 @@ tts:
   gender: female  # female | female — 切换男/女声
   voices:
     male: zh-CN-YunxiNeural       # 云希-男
-    female: zh-CN-XiaoyiNeural  # 晓晓-女
+    female: zh-CN-XiaoxiaoNeural  # 晓晓-女 zh-CN-XiaoyiNeural｜zh-CN-XiaoxiaoNeural
   # voice: zh-CN-YunjianNeural    # 可选：显式指定 edge-tts voice，覆盖 gender
-  rate: "+18%"   # 全局基准语速；Agent 模式会与 voice_director 情感偏移相加
+  rate: "+23%"   # 全局基准语速；Agent 模式会与 voice_director 情感偏移相加
   volume: "+0%"  # 全局基准音量；Agent 模式会与情感偏移相加
 
 # 字幕
@@ -188,7 +211,7 @@ agent_chat:
   max_iterations: 20    # 单次对话最大工具调用步数（默认20）
   # max_tokens: 4096    # 单次 LLM 回复最大 token 数
 
-# # Agent 模式配置（可选，仅 --mode agent 时生效）
+# # Agent 模式配置（可选，仅 --mode agent / run 时生效）
 agent:
   character_review:
     enabled: true              # 双 AI 讨论审核角色列表（budget 模式自动关闭）
@@ -207,3 +230,38 @@ agent:
 #     disable_quality_check: true
 #     use_cheap_llm: true
 #     simple_emotion_analysis: true
+
+# create-video 导演模式配置（仅 create-video 时生效；与 agent 互不共用）
+director:
+  character_consistency:
+    enabled: true
+    anchor_img2img: true       # 第2段起用首镜 img_001 作参考图生图
+    force_prompt_anchor: true   # 每段 prompt 强制注入 visual_bible 角色锚点
+    anchor_segment_id: 1
+  # visual_bible.scene_anchor：ScriptPlanner 自动生成全片固定场景（英文），注入每段 image_prompt；
+  # video_prompt 由 image_prompt + motion 派生，不再单独调 LLM。
+  videogen:
+    backend: jimeng-cli
+    cli_flavor: dreamina
+    cli_command: dreamina
+    model_version: seedance2.0mini
+    ratio: "16:9"
+    video_resolution: 720p
+    duration: 5
+    use_image_as_first_frame: true
+    async_submit: true          # 只提交不等待，适合排队数小时
+    poll_timeout: 21600         # resume 轮询最长 6 小时（勿继承 imagegen.timeout=300）
+    request_interval: 60        # 段间提交间隔，缓解 ExceedConcurrencyLimit
+    retry_on_concurrency: 5     # ret=1310 自动重试次数
+    concurrency_retry_wait: 120 # 每次重试等待秒数
+    fallback_to_image: false    # 视频失败不降级静图
+
+# Video→Video 主角替换（replace-video）：原视频切分 + multimodal2video
+v2v_replace:
+  max_segment_sec: 14.92        # 单段上限（须 <15s，避免 FFmpeg 切出 15.015s 被拒）
+  keep_audio: true             # 上传原片片段音轨以保持口型/节奏（须 2–15s）
+  prompt: ""                   # 留空则用内置默认替换说明
+  extension_prompt: ""         # 替换完成后追加扩演段（CLI --extension-prompt 优先）
+  extension_duration_sec: 10.0   # 扩演段时长
+  segment_anchor: false           # 第 2 段起用上一段成片末帧作衔接 anchor（须顺序生成）
+  # videogen:                  # 可选覆盖 director.videogen

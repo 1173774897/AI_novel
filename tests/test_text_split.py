@@ -99,6 +99,22 @@ class TestSplitUtterances:
         assert is_unspeakable_fragment("——")
         assert is_unspeakable_fragment("—")
 
+    def test_lone_ellipsis_quote_merges_into_previous(self):
+        """单独「……」edge-tts 无法合成，须并入相邻句。"""
+        from src.tts.text_split import is_unspeakable_fragment
+
+        text = (
+            "偷偷在底下劝我，"
+            "「依依你别跟他们对着干，没好处的……」"
+            "「先出去吧，有事情私底下再说。领导最忌讳下属当众驳他的面子了。」"
+            "「……」这些我都无所谓。"
+        )
+        parts = split_utterances(text)
+        assert is_unspeakable_fragment("「……」")
+        assert not any(p.strip() == "「……」" for p in parts)
+        assert all(not _is_orphan_only(p) for p in parts)
+        assert any("「……」" in p and "这些我都无所谓" not in p for p in parts)
+
 
 def _is_orphan_only(text: str) -> bool:
     from src.tts.text_split import _is_orphan_fragment

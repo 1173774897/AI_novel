@@ -128,7 +128,7 @@ class DiffusersBackend(ImageGenerator):
     # Public API
     # ------------------------------------------------------------------
 
-    def generate(self, prompt: str) -> Image.Image:
+    def generate(self, prompt: str, **kwargs: Any) -> Image.Image:
         """根据文本提示词生成图片。
 
         首次调用时自动加载模型。支持风格预设的正/负面提示词叠加。

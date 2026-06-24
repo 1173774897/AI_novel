@@ -18,6 +18,15 @@ class PromptGenTool:
             global_llm = self.config.get("llm", {})
             module_llm = prompt_cfg.get("llm", {})
             prompt_cfg["llm"] = {**global_llm, **module_llm}
+            prompt_cfg["imagegen_backend"] = (self.config.get("imagegen") or {}).get(
+                "backend", ""
+            )
+            prompt_cfg["lora_trigger"] = (self.config.get("imagegen") or {}).get(
+                "lora_trigger", ""
+            )
+            imagegen = self.config.get("imagegen") or {}
+            if "prompt_prefix" in imagegen:
+                prompt_cfg["prompt_prefix"] = imagegen["prompt_prefix"]
             self._gen = PromptGenerator(prompt_cfg)
         return self._gen
 
@@ -76,3 +85,7 @@ class PromptGenTool:
         return gen.generate_video_prompt(
             text, segment_index=segment_index, prev_text=prev_text
         )
+
+    def count_characters(self, text: str) -> int:
+        """本段可见角色人数。"""
+        return self._get_gen().count_segment_characters(text)

@@ -5,6 +5,7 @@ import io
 import logging
 import os
 import time
+from typing import Any
 
 from PIL import Image
 
@@ -54,7 +55,7 @@ class TogetherBackend(ImageGenerator):
 
     _MAX_RETRIES = 3
 
-    def generate(self, prompt: str) -> Image.Image:
+    def generate(self, prompt: str, **kwargs: Any) -> Image.Image:
         """调用 Together.ai API 生成图片，遇到限流/服务器错误/网络错误自动重试。"""
         import httpx
 

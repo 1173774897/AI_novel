@@ -156,6 +156,15 @@ class TestIdeaPlanner:
         assert isinstance(idea, VideoIdea)
         assert idea.video_type  # 应该有默认值
 
+    def test_plan_invalid_json_comedy_fallback(self):
+        """搞笑类灵感解析失败时应落到搞笑方案而非悬疑"""
+        mock_llm = make_mock_llm("not json")
+        planner = IdeaPlanner(mock_llm)
+        idea = planner.plan("1分钟搞笑短剧，主角是橘猫", target_duration=60)
+        assert idea.video_type == "搞笑"
+        assert idea.tone == "搞笑"
+        assert idea.segment_count >= 6
+
 
 class TestScriptPlanner:
     """测试 ScriptPlanner"""
@@ -238,8 +247,45 @@ class TestScriptPlanner:
         response = '```json\n{"title": "测试", "theme": "t", "hook": "h", "segments": [], "ending_hook": ""}\n```'
         mock_llm = make_mock_llm(response)
         planner = ScriptPlanner(mock_llm)
+        with pytest.raises(Exception):
+            planner.plan(self._make_idea(), "测试")
+
+    def test_plan_raises_when_unrecoverable(self):
+        """完全无法解析时应抛出 ScriptPlanError"""
+        from src.scriptplan.script_planner import ScriptPlanError
+
+        mock_llm = make_mock_llm('{"title": "半拉子", "visual_bible": {"style_tags": "x')
+        planner = ScriptPlanner(mock_llm)
+        with pytest.raises(ScriptPlanError, match="segments 为空"):
+            planner.plan(self._make_idea(), "测试")
+
+    def test_plan_retries_when_first_response_empty_segments(self):
+        """首次 segments 为空时自动重试一次"""
+        bad = '{"title": "失败", "segments": []}'
+        good = json.dumps({
+            "title": "重试成功",
+            "theme": "t",
+            "hook": "h",
+            "segments": [
+                {"id": 1, "purpose": "hook", "voiceover": "a", "visual": "b", "duration_sec": 3},
+            ],
+            "ending_hook": "",
+        })
+
+        class RetryLLM:
+            def __init__(self):
+                self.calls = 0
+
+            def chat(self, *args, **kwargs):
+                self.calls += 1
+                content = bad if self.calls == 1 else good
+                from src.llm.llm_client import LLMResponse
+                return LLMResponse(content=content, model="mock")
+
+        planner = ScriptPlanner(RetryLLM())
         script = planner.plan(self._make_idea(), "测试")
-        assert script.title == "测试"
+        assert script.title == "重试成功"
+        assert len(script.segments) == 1
 
 
 class TestAssetStrategy:
@@ -277,14 +323,15 @@ class TestAssetStrategy:
         assert i2v_count <= 2
 
     def test_high_budget_uses_video(self):
-        """high 预算应该使用更多动态素材"""
+        """high 预算应该全片使用 AI 视频（无 Ken Burns 静图段）"""
         strategy = AssetStrategy()
         script = strategy.assign(self._make_script(), budget="high")
+        assert all(seg.asset_type != AssetType.IMAGE for seg in script.segments)
         dynamic_count = sum(
             1 for s in script.segments
             if s.asset_type in (AssetType.IMAGE2VIDEO, AssetType.VIDEO)
         )
-        assert dynamic_count > 0
+        assert dynamic_count == len(script.segments)
 
     def test_hook_and_twist_get_priority(self):
         """hook 和 twist 段应该优先获得动态素材"""
@@ -333,6 +380,13 @@ class TestDirectorPipeline:
         ws = tmp_path / "test_workspace"
         pipeline = DirectorPipeline(
             workspace=str(ws),
-            config={"llm": {}, "tts": {}, "imagegen": {"backend": "together"}, "video": {"resolution": [1080, 1920]}},
+            config={
+                "llm": {},
+                "tts": {},
+                "imagegen": {"backend": "together"},
+                "video": {"resolution": [1080, 1920]},
+                "director": {"videogen": {"backend": "seedance"}},
+            },
         )
         assert ws.exists()
+        assert pipeline.config["videogen"]["backend"] == "seedance"

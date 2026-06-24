@@ -4,6 +4,7 @@ import io
 import logging
 import os
 import time
+from typing import Any
 
 from PIL import Image
 
@@ -98,7 +99,7 @@ class DashScopeBackend(ImageGenerator):
         if wait > 0:
             time.sleep(wait)
 
-    def generate(self, prompt: str) -> Image.Image:
+    def generate(self, prompt: str, **kwargs: Any) -> Image.Image:
         """调用 DashScope API 生成图片，遇到限流/服务器错误/网络错误自动重试。"""
         import httpx
 

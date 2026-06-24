@@ -14,9 +14,14 @@ class VideoGenTool:
 
     def _get_gen(self) -> Any:
         if self._gen is None:
+            from src.videogen.jimeng_cli_backend import merge_jimeng_cli_videogen_config
             from src.videogen.video_generator import create_video_generator
 
-            self._gen = create_video_generator(self.config["videogen"])
+            videogen_cfg = merge_jimeng_cli_videogen_config(
+                dict(self.config.get("videogen", {})),
+                self.config.get("imagegen"),
+            )
+            self._gen = create_video_generator(videogen_cfg)
         return self._gen
 
     def run(

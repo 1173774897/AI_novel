@@ -27,6 +27,11 @@ from src.promptgen.era_context import (
 
 log = logging.getLogger("novel")
 
+
+class PromptGenerationError(RuntimeError):
+    """LLM prompt 生成失败（不可用本地规则回退）。"""
+
+
 # LLM 系统提示词
 _SYSTEM_PROMPT = """\
 你是一个专业的 AI 绘画 Prompt 工程师。你的任务是将中文小说片段转换为 Stable Diffusion 图片生成 Prompt。
@@ -50,6 +55,21 @@ _SYSTEM_PROMPT = """\
    内脏等露骨画面（no gore, no blood, no corpse, no explicit violence）
 
 输出格式: 仅输出英文 prompt 文本，不要包含任何解释或前缀。
+"""
+
+_SYSTEM_PROMPT_COMFYUI = """\
+你是画面描述工程师。将中文小说片段转换为英文生图 prompt。
+
+要求:
+1. 只描述画面内容：人物外观、服装、动作、场景、环境、物品、光线
+2. 角色必须明确性别（male/female），外观与文中一致
+3. 使用逗号分隔的英文短语
+4. 禁止画风词（anime/cel shading/illustration/ghibli/watercolor）
+5. 禁止画质词（masterpiece/8k/highly detailed/best quality）
+6. 禁止镜头术语（POV/cinematic shot/subjective perspective/limited perspective）
+7. 禁止负向词（no/not/without）和抽象氛围堆砌（cheerful mood/light storytelling）
+
+输出格式: 仅输出英文 prompt，不要解释。
 """
 
 _ANIME_LLM_STYLE_NOTE = (
@@ -200,6 +220,84 @@ _PEACEFUL_LLM_USER_NOTE = (
     "\n\n【本段无暴力/血腥描写·必须遵守】"
     "原文是日常、对话或社交场景；prompt 中禁止出现 blood、gore、corpse、"
     "dead body、wound、murder scene 等词汇；画面干净、安全，严格贴合本段情节。"
+)
+
+_COMFYUI_CONTENT_LLM_NOTE = (
+    "\n\n【ComfyUI 仅画面内容】"
+    "只写看得见的人、物、场景、动作、光线；"
+    "不要写画风、画质、镜头、情绪套话；不要写 no/not/without。"
+)
+
+_FLUX_TONE_LIGHT_SUFFIX = (
+    "bright soft daylight or warm indoor lighting, natural vibrant colors, "
+    "high key lighting, clean composition, cheerful everyday mood, light storytelling mood"
+)
+
+_FLUX_HORROR_SUBTLE_SUFFIX = (
+    "subtle psychological horror, implied dread, ominous shadows, "
+    "off-screen tension, cinematic suspense atmosphere"
+)
+
+_ANIME_LLM_STYLE_NOTE_FLUX = (
+    "\n\n画面风格必须为日系动画/插画（anime illustration, 2D cel shading），"
+    "使用 anime style, cel shading, illustration 等正向关键词。"
+)
+
+_STYLE_BOILERPLATE_MARKERS: tuple[str, ...] = (
+    "beautiful anime illustration",
+    "anime style",
+    "anime illustration",
+    "2d illustration",
+    "2d cel shading",
+    "cel shading",
+    "hand-drawn animation",
+    "hand drawn animation",
+    "studio ghibli",
+    "vibrant colors",
+    "beautiful scenery",
+    "bright soft daylight",
+    "warm indoor lighting",
+    "high key lighting",
+    "clean composition",
+    "cheerful everyday mood",
+    "light storytelling mood",
+    "soft natural lighting",
+    "clear composition",
+    "balanced colors",
+    "highly detailed",
+    "cinematic composition",
+    "dramatic lighting",
+    "masterpiece",
+    "best quality",
+    "first person limited perspective",
+    "first person pov",
+    "subjective pov",
+    "limited perspective",
+    "no omniscient view",
+    "third person cinematic shot",
+    "no visible narrator",
+    "no first person face",
+    "peaceful everyday scene",
+    "restaurant or private dining room",
+    "family dinner gathering",
+    "social meal scene",
+    "subtle psychological horror",
+    "implied dread",
+    "off-screen tension",
+    "cinematic suspense",
+    "natural vibrant colors",
+    "detailed animation",
+    "narrator alone in dim room",
+    "uneasy atmosphere",
+    "exquisite watercolor painting of",
+    "cinematic photo of",
+    "masterpiece ink painting of",
+    "cyberpunk scene of",
+)
+
+_NEGATIVE_PHRASE_START_RE = re.compile(
+    r"^(?:not|no|without|never|avoid|excluding|don't|do not)\b",
+    re.IGNORECASE,
 )
 
 # ---- 视频运镜自动匹配规则 (按优先级排列，第一个匹配即返回) ----
@@ -403,7 +501,25 @@ class PromptGenerator:
         )
         self._first_person_work: bool = False
         self._era_override: str | None = normalize_era(config.get("era"))
+        self._comfyui_imagegen: bool = config.get("imagegen_backend") == "comfyui"
+        self._lora_trigger = str(config.get("lora_trigger") or "").strip()
+        if "prompt_prefix" in config:
+            self._comfyui_prompt_prefix = str(config.get("prompt_prefix") or "").strip()
+        elif self._comfyui_imagegen:
+            self._comfyui_prompt_prefix = "beautiful anime illustration of"
+        else:
+            self._comfyui_prompt_prefix = ""
 
+        if self._comfyui_imagegen:
+            log.info(
+                "Prompt 生成: ComfyUI/FLUX 模式，跳过负向提示词"
+                + (f"，LoRA 唤醒词={self._lora_trigger!r}" if self._lora_trigger else "")
+                + (
+                    f"，画风前缀={self._comfyui_prompt_prefix!r}"
+                    if self._comfyui_prompt_prefix
+                    else ""
+                )
+            )
         if self._era_override:
             log.info("时代背景已锁定: %s", self._era_override)
         if self._use_llm:
@@ -423,14 +539,80 @@ class PromptGenerator:
 
     def _append_style_llm_note(self, user_msg: str) -> str:
         if self._style_name == "anime":
-            user_msg += _ANIME_LLM_STYLE_NOTE
+            user_msg += (
+                _ANIME_LLM_STYLE_NOTE_FLUX
+                if self._comfyui_imagegen
+                else _ANIME_LLM_STYLE_NOTE
+            )
         if self._tone == "light":
-            user_msg += _TONE_LIGHT_LLM_NOTE
+            if not self._comfyui_imagegen:
+                user_msg += _TONE_LIGHT_LLM_NOTE
         return user_msg
 
     def _append_llm_context_notes(self, user_msg: str) -> str:
+        if self._comfyui_imagegen:
+            return self._append_era_llm_note(user_msg)
         user_msg = self._append_style_llm_note(user_msg)
         return self._append_era_llm_note(user_msg)
+
+    def _image_system_prompt(self) -> str:
+        return _SYSTEM_PROMPT_COMFYUI if self._comfyui_imagegen else _SYSTEM_PROMPT
+
+    @classmethod
+    def _is_style_boilerplate_segment(cls, segment: str) -> bool:
+        norm = cls._normalize_phrase(segment)
+        if not norm:
+            return True
+        for marker in _STYLE_BOILERPLATE_MARKERS:
+            if norm == marker or norm.startswith(marker + ",") or marker in norm:
+                return True
+        if norm in {
+            "detailed",
+            "vibrant colors",
+            "beautiful scenery",
+            "cheerful mood",
+            "light storytelling",
+        }:
+            return True
+        return False
+
+    @classmethod
+    def _strip_style_boilerplate(cls, prompt: str) -> str:
+        if not prompt:
+            return prompt
+        kept = [
+            seg
+            for seg in cls._split_prompt_phrases(prompt)
+            if not cls._is_style_boilerplate_segment(seg)
+        ]
+        return ", ".join(kept)
+
+    def _finalize_image_prompt(
+        self,
+        prompt: str,
+        visual_text: str,
+        prev_text: str | None = None,
+    ) -> str:
+        if self._comfyui_imagegen:
+            out = self._sanitize_gore_from_prompt(prompt)
+            out = self._strip_negative_phrases(out)
+            out = self._strip_style_boilerplate(out)
+            out = self._compact_prompt_phrases(out)
+            if self._comfyui_prompt_prefix or self._lora_trigger:
+                from src.imagegen.comfyui_backend import finalize_comfyui_positive_prompt
+
+                out = finalize_comfyui_positive_prompt(
+                    out,
+                    lora_trigger=self._lora_trigger,
+                    prompt_prefix=self._comfyui_prompt_prefix,
+                )
+            return out
+
+        prompt = self._apply_subtle_horror(prompt, visual_text)
+        prompt = self._apply_tone(prompt)
+        prompt = self._apply_author_pov(prompt, visual_text)
+        prompt = self._apply_peaceful_scene_guard(prompt, visual_text, prev_text)
+        return self._compact_prompt_phrases(prompt)
 
     # ------------------------------------------------------------------
     # public
@@ -539,6 +721,18 @@ class PromptGenerator:
         if not lines:
             return ""
         return "【本段相关角色，外观保持一致】\n" + "\n".join(lines)
+
+    def count_segment_characters(self, text: str) -> int:
+        """本段可见角色人数（与 cast bible 同源，供 ComfyUI 多人场景加步数）。"""
+        names: list[str] = []
+        seen: set[str] = set()
+        for name in self._narrator_cast_names(text) + self._resolve_segment_characters(
+            text
+        ):
+            if name and name not in seen:
+                names.append(name)
+                seen.add(name)
+        return len(names)
 
     def _resolve_segment_characters(self, text: str) -> list[str]:
         """本段应注入外观的角色名（子串匹配 + 正则，限预填白名单）。"""
@@ -688,11 +882,9 @@ class PromptGenerator:
                 allowed_names=self._seeded_names or None,
             )
 
-        prompt = self._apply_subtle_horror(prompt, visual_text)
-        prompt = self._apply_tone(prompt)
-        prompt = self._apply_author_pov(prompt, visual_text)
-        prompt = self._apply_peaceful_scene_guard(prompt, visual_text, prev_text)
+        prompt = self._finalize_image_prompt(prompt, visual_text, prev_text)
         log.debug("段 %d prompt: %s", segment_index, prompt[:80])
+        log.info("[ImageGen] 段 %d 生图 prompt:\n%s", segment_index, prompt)
         return prompt
 
     def generate_alternate(
@@ -722,45 +914,44 @@ class PromptGenerator:
                     f"{character_prompt}"
                 )
             user_msg = self._append_narrator_instruction(user_msg, narrator_instruction)
-            user_msg += f"\n\n画面风格: {self._style_name}"
+            if not self._comfyui_imagegen:
+                user_msg += f"\n\n画面风格: {self._style_name}"
             user_msg = self._append_llm_context_notes(user_msg)
             user_msg = self._append_peaceful_llm_note(user_msg, visual_text, prev_text)
             user_msg += (
                 f"\n\n【换角度重试 #{variant + 1}】{hint_cn}\n"
-                f"Alternate framing (English): {hint_en}. "
-                "PG-13, no gore, no explicit violence."
+                f"Alternate framing (English): {hint_en}."
             )
+            if not self._comfyui_imagegen:
+                user_msg += " PG-13, no gore, no explicit violence."
             try:
                 client = self._get_llm_client()
                 response = client.chat(
                     messages=[
-                        {"role": "system", "content": _SYSTEM_PROMPT},
+                        {"role": "system", "content": self._image_system_prompt()},
                         {"role": "user", "content": user_msg},
                     ],
                     temperature=self._temperature,
                 )
                 raw = (response.content or "").strip()
-                if raw:
-                    prompt = raw
-                else:
-                    prompt = self._generate_local(
-                        visual_text, character_prompt, narrator_instruction
-                    )
+                if not raw:
+                    raise PromptGenerationError("LLM 返回空 prompt（换角度模式）")
+                prompt = raw
+            except PromptGenerationError:
+                raise
             except Exception as exc:
-                log.warning("换角度 LLM prompt 失败 (%s)，回退本地模式", exc)
-                prompt = self._generate_local(
-                    visual_text, character_prompt, narrator_instruction
-                )
+                log.error("换角度 LLM prompt 失败: %s", exc)
+                raise PromptGenerationError(
+                    f"换角度 LLM prompt 生成失败: {exc}"
+                ) from exc
         else:
             prompt = self._generate_local(
                 visual_text, character_prompt, narrator_instruction
             )
 
         prompt = f"{prompt}, {hint_en}"
-        prompt = self._apply_subtle_horror(prompt, visual_text)
-        prompt = self._apply_tone(prompt)
-        prompt = self._apply_author_pov(prompt, visual_text)
-        prompt = self._apply_peaceful_scene_guard(prompt, visual_text, prev_text)
+        prompt = self._finalize_image_prompt(prompt, visual_text, prev_text)
+        log.info("[ImageGen] 段 %d 换角度生图 prompt #%d:\n%s", segment_index, variant + 1, prompt)
         log.debug("段 %d 换角度 prompt #%d: %s", segment_index, variant + 1, prompt[:80])
         return prompt
 
@@ -831,14 +1022,14 @@ class PromptGenerator:
     def _apply_author_pov(self, prompt: str, text: str) -> str:
         if self._uses_author_pov(text):
             suffix = build_author_pov_prompt_suffix(text)
-            if suffix.lower() in prompt.lower():
-                return prompt
-            return f"{prompt.rstrip(', ')}, {suffix}"
+            return self._compact_prompt_phrases(
+                self._append_missing_phrases(prompt, suffix)
+            )
         if segment_has_first_person(text) and not self._narrator_has_visual_identity():
             suffix = build_omit_narrator_prompt_suffix()
-            if suffix.lower() in prompt.lower():
-                return prompt
-            return f"{prompt.rstrip(', ')}, {suffix}"
+            return self._compact_prompt_phrases(
+                self._append_missing_phrases(prompt, suffix)
+            )
         return prompt
 
     def _is_horror_segment(self, text: str) -> bool:
@@ -862,9 +1053,113 @@ class PromptGenerator:
         cleaned = re.sub(r"\s{2,}", " ", cleaned)
         return cleaned.strip(" ,")
 
+    @classmethod
+    def _phrase_contains(cls, haystack: str, needle: str) -> bool:
+        if not needle:
+            return False
+        if needle in haystack:
+            return True
+        needle_core = re.sub(r"^(?:a|an|the)\s+", "", needle)
+        haystack_core = re.sub(r"^(?:a|an|the)\s+", "", haystack)
+        return bool(needle_core and needle_core in haystack_core)
+
+    @classmethod
+    def _normalize_phrase(cls, phrase: str) -> str:
+        return re.sub(r"\s+", " ", phrase.strip().lower())
+
+    @classmethod
+    def _split_prompt_phrases(cls, text: str) -> list[str]:
+        return [part.strip() for part in text.split(",") if part.strip()]
+
+    @classmethod
+    def _append_missing_phrases(cls, prompt: str, extra: str) -> str:
+        """只追加 base 中尚未出现的 comma 短语（忽略大小写）。"""
+        if not extra or not extra.strip():
+            return prompt.rstrip(", ").strip()
+
+        base = prompt.rstrip(", ").strip()
+        existing = cls._split_prompt_phrases(base)
+        existing_norms = [cls._normalize_phrase(seg) for seg in existing]
+        missing: list[str] = []
+
+        for phrase in cls._split_prompt_phrases(extra):
+            norm = cls._normalize_phrase(phrase)
+            if not norm:
+                continue
+            if norm in (prompt or "").lower():
+                continue
+            if any(cls._phrase_contains(existing_norm, norm) for existing_norm in existing_norms):
+                continue
+            if any(cls._phrase_contains(norm, existing_norm) for existing_norm in existing_norms):
+                continue
+            missing.append(phrase)
+            existing_norms.append(norm)
+
+        if not missing:
+            return base
+        if not base:
+            return ", ".join(missing)
+        return f"{base}, {', '.join(missing)}"
+
+    @classmethod
+    def _compact_prompt_phrases(cls, prompt: str) -> str:
+        """合并 comma 短语：去重 + 去掉被更长短语包含的短片段。"""
+        segments = cls._split_prompt_phrases(prompt)
+        if len(segments) <= 1:
+            return prompt.strip(" ,")
+
+        unique: list[str] = []
+        seen: set[str] = set()
+        for seg in segments:
+            key = cls._normalize_phrase(seg)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            unique.append(seg)
+
+        norms = [cls._normalize_phrase(seg) for seg in unique]
+        kept: list[str] = []
+        for i, seg in enumerate(unique):
+            norm = norms[i]
+            if any(
+                i != j
+                and norm != norms[j]
+                and cls._phrase_contains(norms[j], norm)
+                for j in range(len(unique))
+            ):
+                continue
+            kept.append(seg)
+        return ", ".join(kept)
+
+    @staticmethod
+    def _is_negative_phrase(segment: str) -> bool:
+        s = segment.strip()
+        if not s:
+            return True
+        if s.upper().startswith("NOT "):
+            return True
+        return bool(_NEGATIVE_PHRASE_START_RE.match(s))
+
+    @classmethod
+    def _strip_negative_phrases(cls, prompt: str) -> str:
+        if not prompt:
+            return prompt
+        kept = [
+            part.strip()
+            for part in prompt.split(",")
+            if part.strip() and not cls._is_negative_phrase(part)
+        ]
+        return ", ".join(kept)
+
     @staticmethod
     def _suffix_present(prompt: str, suffix: str) -> bool:
         return suffix.lower() in (prompt or "").lower()
+
+    @classmethod
+    def _positive_only_keywords(cls, text: str) -> str:
+        if not text:
+            return text
+        return cls._strip_negative_phrases(text.replace(";", ","))
 
     def _apply_peaceful_scene_guard(
         self,
@@ -877,11 +1172,12 @@ class PromptGenerator:
             return prompt
         out = self._sanitize_gore_from_prompt(prompt)
         if self._is_dining_scene(text, prev_text):
-            if not self._suffix_present(out, _DINING_SCENE_SUFFIX):
-                out = f"{out.rstrip(', ')}, {_DINING_SCENE_SUFFIX}"
+            out = self._append_missing_phrases(out, _DINING_SCENE_SUFFIX)
+        if self._comfyui_imagegen:
+            return self._compact_prompt_phrases(out)
         if not self._suffix_present(out, _PEACEFUL_GUARD_SUFFIX):
-            out = f"{out.rstrip(', ')}, {_PEACEFUL_GUARD_SUFFIX}"
-        return out
+            out = self._append_missing_phrases(out, _PEACEFUL_GUARD_SUFFIX)
+        return self._compact_prompt_phrases(out)
 
     def _append_peaceful_llm_note(
         self,
@@ -891,12 +1187,20 @@ class PromptGenerator:
     ) -> str:
         if self._has_violent_content(text):
             return user_msg
-        user_msg += _PEACEFUL_LLM_USER_NOTE
+        if self._comfyui_imagegen:
+            user_msg += _COMFYUI_CONTENT_LLM_NOTE
+        else:
+            user_msg += _PEACEFUL_LLM_USER_NOTE
         if self._is_dining_scene(text, prev_text):
-            user_msg += (
-                "\n场景提示：本段发生在饭局/聚餐，请画餐厅或包间圆桌用餐，"
-                "不要画客厅、卧室或犯罪现场。"
-            )
+            if self._comfyui_imagegen:
+                user_msg += (
+                    "\n场景提示：本段发生在饭局/聚餐，请画餐厅或包间圆桌用餐。"
+                )
+            else:
+                user_msg += (
+                    "\n场景提示：本段发生在饭局/聚餐，请画餐厅或包间圆桌用餐，"
+                    "不要画客厅、卧室或犯罪现场。"
+                )
         return user_msg
 
     def _apply_subtle_horror(self, prompt: str, text: str) -> str:
@@ -907,20 +1211,27 @@ class PromptGenerator:
             or not self._is_horror_segment(text)
         ):
             return prompt
-        if _HORROR_SUBTLE_IMAGE_SUFFIX.lower() in prompt.lower():
-            return prompt
-        return f"{prompt.rstrip(', ')}, {_HORROR_SUBTLE_IMAGE_SUFFIX}"
+        suffix = (
+            _FLUX_HORROR_SUBTLE_SUFFIX
+            if self._comfyui_imagegen
+            else _HORROR_SUBTLE_IMAGE_SUFFIX
+        )
+        return self._compact_prompt_phrases(self._append_missing_phrases(prompt, suffix))
 
     def _apply_tone(self, prompt: str) -> str:
         """整体基调修饰（light=更轻松明亮）。"""
         if self._tone != "light":
             return prompt
         out = prompt
-        for heavy, light in _TONE_LIGHT_SCENE_OVERRIDES.items():
-            out = out.replace(heavy, light)
-        if _TONE_LIGHT_SUFFIX.lower() not in out.lower():
-            out = f"{out.rstrip(', ')}, {_TONE_LIGHT_SUFFIX}"
-        return out
+        if not self._comfyui_imagegen:
+            for heavy, light in _TONE_LIGHT_SCENE_OVERRIDES.items():
+                out = out.replace(heavy, light)
+        suffix = (
+            _FLUX_TONE_LIGHT_SUFFIX
+            if self._comfyui_imagegen
+            else _TONE_LIGHT_SUFFIX
+        )
+        return self._compact_prompt_phrases(self._append_missing_phrases(out, suffix))
 
     # ------------------------------------------------------------------
     # video prompt - LLM mode
@@ -940,18 +1251,18 @@ class PromptGenerator:
         prev_text: str | None = None,
     ) -> str:
         """使用 LLM 生成视频 prompt。"""
-        try:
-            user_msg = f"小说文本:\n{text}"
-            if character_prompt:
-                user_msg += f"\n\n已知角色描述（必须严格保持一致，尤其是性别和外观）:\n{character_prompt}"
-            user_msg = self._append_narrator_instruction(user_msg, narrator_instruction)
-            user_msg += f"\n\n画面风格: {self._style_name}"
-            user_msg = self._append_llm_context_notes(user_msg)
-            user_msg = self._append_peaceful_llm_note(user_msg, text, prev_text)
-            user_msg += "\n\n重要: 仔细分析文中每个角色的性别（他=male, 她=female），确保 prompt 中角色性别正确，不要搞混。"
-            if self._horror_style != "off" and self._tone != "light" and self._is_horror_segment(text):
-                user_msg += _HORROR_LLM_USER_NOTE
+        user_msg = f"小说文本:\n{text}"
+        if character_prompt:
+            user_msg += f"\n\n已知角色描述（必须严格保持一致，尤其是性别和外观）:\n{character_prompt}"
+        user_msg = self._append_narrator_instruction(user_msg, narrator_instruction)
+        user_msg += f"\n\n画面风格: {self._style_name}"
+        user_msg = self._append_llm_context_notes(user_msg)
+        user_msg = self._append_peaceful_llm_note(user_msg, text, prev_text)
+        user_msg += "\n\n重要: 仔细分析文中每个角色的性别（他=male, 她=female），确保 prompt 中角色性别正确，不要搞混。"
+        if self._horror_style != "off" and self._tone != "light" and self._is_horror_segment(text):
+            user_msg += _HORROR_LLM_USER_NOTE
 
+        try:
             client = self._get_llm_client()
             response = client.chat(
                 messages=[
@@ -960,23 +1271,15 @@ class PromptGenerator:
                 ],
                 temperature=self._temperature,
             )
-
-            raw_prompt = response.content.strip()
-            if not raw_prompt:
-                log.warning("LLM 返回空视频 prompt，回退到本地模式")
-                return self._generate_video_local(
-                    text, character_prompt, narrator_instruction
-                )
-
-            # 附加视频风格关键词
-            prompt = self._apply_video_style(raw_prompt)
-            return prompt
-
         except Exception as e:
-            log.warning("LLM 视频 prompt 生成失败 (%s)，回退到本地模式", e)
-            return self._generate_video_local(
-                text, character_prompt, narrator_instruction
-            )
+            log.error("LLM 视频 prompt 生成失败: %s", e)
+            raise PromptGenerationError(f"LLM 视频 prompt 生成失败: {e}") from e
+
+        raw_prompt = (response.content or "").strip()
+        if not raw_prompt:
+            raise PromptGenerationError("LLM 返回空视频 prompt")
+
+        return self._apply_video_style(raw_prompt)
 
     # ------------------------------------------------------------------
     # video prompt - local fallback mode
@@ -1102,40 +1405,41 @@ class PromptGenerator:
         prev_text: str | None = None,
     ) -> str:
         """使用 LLM 生成高质量 prompt。"""
-        try:
-            user_msg = f"小说文本:\n{text}"
-            if character_prompt:
-                user_msg += f"\n\n已知角色描述（必须严格保持一致，尤其是性别和外观）:\n{character_prompt}"
-            user_msg = self._append_narrator_instruction(user_msg, narrator_instruction)
+        user_msg = f"小说文本:\n{text}"
+        if character_prompt:
+            user_msg += f"\n\n已知角色描述（必须严格保持一致，尤其是性别和外观）:\n{character_prompt}"
+        user_msg = self._append_narrator_instruction(user_msg, narrator_instruction)
+        if not self._comfyui_imagegen:
             user_msg += f"\n\n画面风格: {self._style_name}"
-            user_msg = self._append_llm_context_notes(user_msg)
-            user_msg = self._append_peaceful_llm_note(user_msg, text, prev_text)
-            user_msg += "\n\n重要: 仔细分析文中每个角色的性别（他=male, 她=female），确保 prompt 中角色性别正确，不要搞混。"
-            if self._horror_style != "off" and self._tone != "light" and self._is_horror_segment(text):
-                user_msg += _HORROR_LLM_USER_NOTE
+        user_msg = self._append_llm_context_notes(user_msg)
+        user_msg = self._append_peaceful_llm_note(user_msg, text, prev_text)
+        user_msg += "\n\n重要: 仔细分析文中每个角色的性别（他=male, 她=female），确保 prompt 中角色性别正确，不要搞混。"
+        if (
+            not self._comfyui_imagegen
+            and self._horror_style != "off"
+            and self._tone != "light"
+            and self._is_horror_segment(text)
+        ):
+            user_msg += _HORROR_LLM_USER_NOTE
 
+        try:
             client = self._get_llm_client()
             response = client.chat(
                 messages=[
-                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "system", "content": self._image_system_prompt()},
                     {"role": "user", "content": user_msg},
                 ],
                 temperature=self._temperature,
             )
-
-            raw_prompt = response.content.strip()
-            if not raw_prompt:
-                log.warning("LLM 返回空 prompt，回退到本地模式")
-                return self._generate_local(
-                    text, character_prompt, narrator_instruction
-                )
-
-            prompt = self._apply_style(raw_prompt)
-            return prompt
-
         except Exception as e:
-            log.warning("LLM prompt 生成失败 (%s)，回退到本地模式", e)
-            return self._generate_local(text, character_prompt, narrator_instruction)
+            log.error("LLM prompt 生成失败: %s", e)
+            raise PromptGenerationError(f"LLM prompt 生成失败: {e}") from e
+
+        raw_prompt = (response.content or "").strip()
+        if not raw_prompt:
+            raise PromptGenerationError("LLM 返回空 prompt")
+
+        return self._apply_style(raw_prompt)
 
     # ------------------------------------------------------------------
     # local fallback mode
@@ -1153,31 +1457,28 @@ class PromptGenerator:
 
         parts: list[str] = []
 
-        # 1. 风格前缀
-        prefix = self._preset.get("prefix", "")
-        if prefix:
-            parts.append(prefix)
+        if not self._comfyui_imagegen:
+            prefix = self._preset.get("prefix", "")
+            if prefix:
+                parts.append(prefix)
 
-        # 2. 场景描述
         if scene_parts:
             parts.append(", ".join(scene_parts))
 
-        # 3. 角色追踪描述
         if character_prompt:
             parts.append(character_prompt)
 
-        # 4. 画质提升词
-        quality = (
-            "soft natural lighting, clear composition, balanced colors"
-            if self._tone == "light"
-            else "highly detailed, cinematic composition, dramatic lighting"
-        )
-        parts.append(quality)
+        if not self._comfyui_imagegen:
+            quality = (
+                "soft natural lighting, clear composition, balanced colors"
+                if self._tone == "light"
+                else "highly detailed, cinematic composition, dramatic lighting"
+            )
+            parts.append(quality)
 
-        # 5. 风格正向关键词
-        positive = self._preset.get("positive", "")
-        if positive:
-            parts.append(positive)
+            positive = self._preset.get("positive", "")
+            if positive:
+                parts.append(positive)
 
         if era == CLASSICAL:
             parts.append(
@@ -1279,15 +1580,25 @@ class PromptGenerator:
             cleaned = _PHOTOREALISTIC_TERMS_RE.sub("", cleaned)
             cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ,")
 
+        if self._comfyui_imagegen:
+            return self._strip_style_boilerplate(cleaned)
+
         parts: list[str] = []
         prefix = self._preset.get("prefix", "")
-        if prefix and prefix.lower() not in cleaned.lower()[:80]:
+        if prefix and prefix.lower() not in cleaned.lower():
             parts.append(prefix)
         if cleaned:
             parts.append(cleaned)
 
+        base = ", ".join(parts)
         positive = self._preset.get("positive", "")
         if positive:
-            parts.append(positive)
+            positive = (
+                self._positive_only_keywords(positive)
+                if self._comfyui_imagegen
+                else positive
+            )
+            if positive:
+                base = self._append_missing_phrases(base, positive)
 
-        return ", ".join(parts)
+        return self._compact_prompt_phrases(base)

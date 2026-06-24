@@ -18,8 +18,11 @@ class ImageGenTool:
             self._gen = create_image_generator(self.config["imagegen"])
         return self._gen
 
-    def run(self, prompt: str, output_path: Path) -> Path:
+    def run(self, prompt: str, output_path: Path, *, person_count: int | None = None) -> Path:
         gen = self._get_gen()
-        img = gen.generate(prompt)
+        kwargs: dict[str, Any] = {}
+        if person_count is not None:
+            kwargs["person_count"] = person_count
+        img = gen.generate(prompt, **kwargs)
         img.save(str(output_path))
         return output_path

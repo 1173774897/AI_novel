@@ -57,6 +57,9 @@ class AssetStrategy:
         max_video = profile["max_video_segments"]
         max_i2v = profile["max_i2v_segments"]
 
+        if budget == "high":
+            return self._assign_all_video(script, max_video, max_i2v)
+
         video_count = 0
         i2v_count = 0
 
@@ -114,4 +117,39 @@ class AssetStrategy:
             video_count,
         )
 
+        return script
+
+    def _assign_all_video(
+        self,
+        script: VideoScript,
+        max_video: int,
+        max_i2v: int,
+    ) -> VideoScript:
+        """high 预算：全片 AI 视频，不分配 Ken Burns 静图段。"""
+        video_count = 0
+        i2v_count = 0
+
+        for seg in script.segments:
+            # 图生视频优先，角色/外观一致性更好；纯文生视频留给 twist/climax
+            if (
+                seg.purpose in (SegmentPurpose.TWIST, SegmentPurpose.CLIMAX)
+                and video_count < max_video
+                and i2v_count >= max_i2v
+            ):
+                seg.asset_type = AssetType.VIDEO
+                video_count += 1
+            elif i2v_count < max_i2v:
+                seg.asset_type = AssetType.IMAGE2VIDEO
+                i2v_count += 1
+            elif video_count < max_video:
+                seg.asset_type = AssetType.VIDEO
+                video_count += 1
+            else:
+                seg.asset_type = AssetType.IMAGE2VIDEO
+
+        log.info(
+            "素材分配完成(high): %d段图生视频, %d段AI视频",
+            i2v_count,
+            video_count,
+        )
         return script

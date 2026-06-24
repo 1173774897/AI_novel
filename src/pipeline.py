@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.checkpoint import Checkpoint
-from src.config_manager import load_config
+from src.config_manager import load_config, resolve_pipeline_config
 from src.logger import log, get_progress
 from src.segmenter.text_segmenter import create_segmenter
 from src.promptgen.prompt_generator import PromptGenerator
@@ -36,7 +36,8 @@ class Pipeline:
             raise FileNotFoundError(f"输入文件不存在: {self.input_file}")
 
         base_cfg = load_config(config_path)
-        self.cfg = _deep_merge(base_cfg, config) if config else base_cfg
+        merged = _deep_merge(base_cfg, config) if config else base_cfg
+        self.cfg = resolve_pipeline_config(merged, "agent")
         proj_name = self.input_file.stem
 
         base = Path(self.cfg.get("project", {}).get("default_workspace", "workspace"))
@@ -84,7 +85,7 @@ class Pipeline:
         _notify(2, "生成图片 Prompt")
         prompts = self._stage_prompt(segments)
         _notify(3, "生成图片")
-        images = self._stage_image(prompts)
+        images = self._stage_image(prompts, segments)
 
         # Stage 3.5 (可选): AI 视频片段生成
         video_clips: list[Path] | None = None
@@ -148,6 +149,15 @@ class Pipeline:
         global_llm = self.cfg.get("llm", {})
         module_llm = prompt_cfg.get("llm", {})
         prompt_cfg["llm"] = {**global_llm, **module_llm}
+        prompt_cfg["imagegen_backend"] = (self.cfg.get("imagegen") or {}).get(
+            "backend", ""
+        )
+        prompt_cfg["lora_trigger"] = (self.cfg.get("imagegen") or {}).get(
+            "lora_trigger", ""
+        )
+        imagegen = self.cfg.get("imagegen") or {}
+        if "prompt_prefix" in imagegen:
+            prompt_cfg["prompt_prefix"] = imagegen["prompt_prefix"]
         gen = PromptGenerator(prompt_cfg)
 
         # 用全文帮助判断时代背景（现代 vs 古风）
@@ -176,13 +186,19 @@ class Pipeline:
         return prompts
 
     # -- Stage 3: 生图 --
-    def _stage_image(self, prompts: list[str]) -> list[Path]:
+    def _stage_image(
+        self, prompts: list[str], segments: list[dict] | None = None
+    ) -> list[Path]:
         if self.resume and self.ckpt.is_done("image"):
             log.info("[断点续传] 跳过图片生成")
             return sorted(self.img_dir.glob("*.png"))
 
         log.info("阶段 3/5: 生成图片")
         gen = create_image_generator(self.cfg["imagegen"])
+        person_counts: list[int] | None = None
+        if segments and (self.cfg.get("imagegen") or {}).get("backend") == "comfyui":
+            person_counts = self._segment_person_counts(segments)
+
         images = []
 
         with get_progress() as progress:
@@ -195,7 +211,11 @@ class Pipeline:
                     progress.advance(task)
                     continue
 
-                img = gen.generate(prompt)
+                log.info("[ImageGen] 段%d 生图 prompt:\n%s", i, prompt)
+                kwargs: dict = {}
+                if person_counts is not None and i < len(person_counts):
+                    kwargs["person_count"] = person_counts[i]
+                img = gen.generate(prompt, **kwargs)
                 img.save(str(out))
                 images.append(out)
                 self.ckpt.update_segment(i, "image", str(out))
@@ -203,6 +223,22 @@ class Pipeline:
 
         self.ckpt.mark_done("image")
         return images
+
+    def _segment_person_counts(self, segments: list[dict]) -> list[int]:
+        """各段可见角色人数（ComfyUI 多人场景加步数）。"""
+        prompt_cfg = dict(self.cfg.get("promptgen", {}))
+        global_llm = self.cfg.get("llm", {})
+        module_llm = prompt_cfg.get("llm", {})
+        prompt_cfg["llm"] = {**global_llm, **module_llm}
+        prompt_cfg["imagegen_backend"] = (self.cfg.get("imagegen") or {}).get(
+            "backend", ""
+        )
+        from src.promptgen.prompt_generator import PromptGenerator
+
+        gen = PromptGenerator(prompt_cfg)
+        full_text = self.input_file.read_text(encoding="utf-8")
+        gen.set_full_text(full_text)
+        return [gen.count_segment_characters(seg["text"]) for seg in segments]
 
     # -- Stage 3.5: AI 视频片段生成 (可选) --
     def _stage_videogen(self, segments: list[dict], images: list[Path]) -> list[Path]:
@@ -212,6 +248,11 @@ class Pipeline:
 
         log.info("阶段 3.5: AI 视频片段生成")
         videogen_cfg = dict(self.cfg["videogen"])
+        from src.videogen.jimeng_cli_backend import merge_jimeng_cli_videogen_config
+
+        videogen_cfg = merge_jimeng_cli_videogen_config(
+            videogen_cfg, self.cfg.get("imagegen")
+        )
 
         # 创建视频生成器
         gen = create_video_generator(videogen_cfg)
@@ -221,6 +262,9 @@ class Pipeline:
         global_llm = self.cfg.get("llm", {})
         module_llm = prompt_cfg.get("llm", {})
         prompt_cfg["llm"] = {**global_llm, **module_llm}
+        prompt_cfg["imagegen_backend"] = (self.cfg.get("imagegen") or {}).get(
+            "backend", ""
+        )
         prompt_gen = PromptGenerator(prompt_cfg)
 
         full_text = self.input_file.read_text(encoding="utf-8")

@@ -56,6 +56,7 @@ class ScriptSegment(BaseModel):
     audio_path: str = ""       # 配音文件路径
     srt_path: str = ""         # 字幕文件路径
     asset_path: str = ""       # 素材文件路径（图片或视频）
+    video_submit_id: str = ""  # 即梦异步视频任务 id（create-video resume 用）
 
 
 class VideoIdea(BaseModel):
@@ -72,6 +73,7 @@ class VideoIdea(BaseModel):
 class VisualBible(BaseModel):
     """全片视觉圣经 — 保证所有画面风格和角色外观一致"""
     style_tags: str = ""         # 全片风格标签，如 "cinematic, dark moody, neon-lit"
+    scene_anchor: str = ""       # 固定场景/布景锚点（英文），全片复用
     negative_prompt: str = ""    # 全片 negative prompt
     characters: list[dict] = Field(default_factory=list)
     # 每个角色: {"name": "张伟", "prompt_anchor": "a 28yo Chinese man, short black hair, lean build, gray hoodie, scar on left eyebrow"}

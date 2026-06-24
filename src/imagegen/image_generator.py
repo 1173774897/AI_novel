@@ -6,6 +6,7 @@
 
 import logging
 from abc import ABC, abstractmethod
+from typing import Any
 
 from PIL import Image
 
@@ -25,6 +26,11 @@ _BACKEND_DEFAULTS: dict[str, dict] = {
         "cli_command": "dreamina",
         "ratio": "9:16",
         "resolution": "2k",
+    },
+    "comfyui": {
+        "model": "",
+        "base_url": "http://127.0.0.1:8188",
+        "workflow": "workflows/comfyui/fluxscale_workflow.json",
     },
 }
 
@@ -81,6 +87,11 @@ def _resolve_imagegen_config(config: dict) -> dict:
             resolved["cli_flavor"] = defaults.get("cli_flavor", "dreamina")
         if "cli_command" not in resolved:
             resolved["cli_command"] = defaults.get("cli_command", "dreamina")
+    elif backend == "comfyui":
+        if not resolved.get("workflow"):
+            resolved["workflow"] = defaults.get("workflow", "")
+        if not resolved.get("base_url"):
+            resolved["base_url"] = defaults.get("base_url", "http://127.0.0.1:8188")
 
     return resolved
 
@@ -89,11 +100,12 @@ class ImageGenerator(ABC):
     """图片生成器抽象基类。"""
 
     @abstractmethod
-    def generate(self, prompt: str) -> Image.Image:
+    def generate(self, prompt: str, **kwargs: Any) -> Image.Image:
         """根据文本提示词生成一张图片。
 
         Args:
             prompt: 用于图片生成的文本提示词。
+            **kwargs: 后端可选参数（如 ComfyUI 的 ``person_count``）。
 
         Returns:
             生成的 PIL Image 对象。
@@ -135,5 +147,9 @@ def create_image_generator(config: dict) -> ImageGenerator:
         from src.imagegen.jimeng_cli_backend import JimengCliBackend
 
         return JimengCliBackend(config)
+    elif backend == "comfyui":
+        from src.imagegen.comfyui_backend import ComfyUIBackend
+
+        return ComfyUIBackend(config)
     else:
         raise ValueError(f"Unknown image backend: {backend}")

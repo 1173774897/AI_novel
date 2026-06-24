@@ -525,14 +525,14 @@ class TestPipelineMalformedInput:
         assert p._videogen_enabled is False
 
     def test_pipeline_videogen_enabled_with_backend(self, tmp_path: Path):
-        """配置有 videogen.backend → _videogen_enabled = True。"""
+        """配置 agent.videogen.backend → _videogen_enabled = True。"""
         from src.pipeline import Pipeline
 
         input_file = tmp_path / "test.txt"
         input_file.write_text("测试", encoding="utf-8")
 
         cfg = _make_minimal_config()
-        cfg["videogen"] = {"backend": "kling"}
+        cfg["agent"] = {"videogen": {"backend": "kling"}}
         cfg_file = tmp_path / "config.yaml"
         cfg_file.write_text(yaml.dump(cfg), encoding="utf-8")
 
@@ -540,6 +540,23 @@ class TestPipelineMalformedInput:
                      workspace=tmp_path / "ws")
 
         assert p._videogen_enabled is True
+
+    def test_pipeline_videogen_director_section_not_used(self, tmp_path: Path):
+        """director.videogen 不影响 run/agent 流水线。"""
+        from src.pipeline import Pipeline
+
+        input_file = tmp_path / "test.txt"
+        input_file.write_text("测试", encoding="utf-8")
+
+        cfg = _make_minimal_config()
+        cfg["director"] = {"videogen": {"backend": "seedance"}}
+        cfg_file = tmp_path / "config.yaml"
+        cfg_file.write_text(yaml.dump(cfg), encoding="utf-8")
+
+        p = Pipeline(input_file=input_file, config_path=cfg_file,
+                     workspace=tmp_path / "ws")
+
+        assert p._videogen_enabled is False
 
     def test_pipeline_videogen_empty_backend_not_enabled(self, tmp_path: Path):
         """videogen.backend 为空字符串 → _videogen_enabled = False。"""

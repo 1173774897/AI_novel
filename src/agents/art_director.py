@@ -63,6 +63,7 @@ class ArtDirectorAgent:
         decisions: list[Decision],
         *,
         regen_prompt: Callable[[int], str] | None = None,
+        person_count: int | None = None,
     ) -> None:
         """生图；不合规时先软化 3 次，再换角度重生 prompt 3 次。"""
         from src.imagegen.dashscope_backend import ContentModerationError
@@ -82,7 +83,7 @@ class ArtDirectorAgent:
         def _try_generate(current: str, *, phase: str, step: int) -> bool:
             nonlocal last_detail, attempts_used
             try:
-                self.image_gen.run(current, out_path)
+                self.image_gen.run(current, out_path, person_count=person_count)
             except ContentModerationError:
                 last_detail = "content_moderation"
             except JimengGenerationError as exc:
@@ -251,12 +252,15 @@ class ArtDirectorAgent:
                     variant=variant,
                 )
 
+            person_count = self.prompt_gen.count_characters(text)
+
             self._run_image_gen_with_moderation_fallback(
                 prompt,
                 out_path,
                 index,
                 decisions,
                 regen_prompt=_regen_prompt,
+                person_count=person_count,
             )
 
             if not quality_enabled:

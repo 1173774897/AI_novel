@@ -1,9 +1,8 @@
 """ScriptPlanner - 将视频方案转换为结构化脚本"""
 from __future__ import annotations
-import json
 import logging
-import re
 from src.llm.llm_client import LLMClient
+from src.scriptplan.json_utils import close_truncated_json, parse_llm_json
 from src.scriptplan.models import (
     AssetType,
     MotionType,
@@ -16,6 +15,11 @@ from src.scriptplan.models import (
 )
 
 log = logging.getLogger("scriptplan")
+
+
+class ScriptPlanError(RuntimeError):
+    """脚本规划失败（LLM 输出不可解析或 segments 为空）。"""
+
 
 # 用途 → 默认语音参数映射
 _PURPOSE_VOICE_DEFAULTS: dict[str, dict] = {
@@ -40,6 +44,11 @@ _PURPOSE_MOTION_DEFAULTS: dict[str, str] = {
 
 class ScriptPlanner:
     """将视频方案转换为结构化脚本（逐段旁白+画面+时长）。"""
+
+    @staticmethod
+    def _estimate_max_tokens(idea: VideoIdea) -> int:
+        """按分段数估算输出 token，避免 60s 长脚本被截断。"""
+        return max(4096, idea.segment_count * 520 + 1200)
 
     def __init__(self, llm: LLMClient):
         self.llm = llm
@@ -83,9 +92,13 @@ class ScriptPlanner:
             "【视觉圣经 - visual_bible】\n"
             "你还必须输出一个 visual_bible 对象，用于保证全片画面风格和角色外观的一致性：\n"
             "- style_tags: 全片风格关键词（英文），如 'cinematic, dark moody, neon-lit, urban'\n"
+            "- scene_anchor: 全片固定场景/布景锚点（英文），描述同一空间、光线、关键道具位置；"
+            "全片所有 segment 必须发生在该场景内，例如 "
+            "'modest apartment entryway, beige doormat, single cardboard box on floor, warm window side light'\n"
             "- negative_prompt: 全片负面提示词（英文），如 'blurry, deformed, extra limbs, text, watermark'\n"
-            "- characters: 出场角色列表，每个角色包含 name（中文名）和 prompt_anchor（英文外观锚点描述，必须包含性别、年龄、发型、服装、体型、标志性特征），例如：\n"
-            '  {"name": "张伟", "prompt_anchor": "a 28 year old Chinese man, short black hair, lean build, gray hoodie, scar on left eyebrow"}\n'
+            "- characters: 出场角色列表，每个角色包含 name（中文名）、prompt_anchor（英文外观锚点）、可选 aliases（别名如 橘猫/猫），例如：\n"
+            '  {"name": "大橘", "prompt_anchor": "a chubby orange tabby cat...", "aliases": ["橘猫", "猫"]}\n'
+            '  {"name": "张伟", "prompt_anchor": "a 28 year old Chinese man, short black hair, lean build, gray hoodie"}\n'
             "角色的 prompt_anchor 一旦定义，全片所有 segment 中该角色的描写必须与此一致。\n\n"
             "请返回严格的 JSON 格式：\n"
             "{\n"
@@ -94,6 +107,7 @@ class ScriptPlanner:
             '  "hook": "前3秒钩子的核心文案",\n'
             '  "visual_bible": {\n'
             '    "style_tags": "cinematic, dark moody, ...",\n'
+            '    "scene_anchor": "same room layout, lighting, key props...",\n'
             '    "negative_prompt": "blurry, deformed, ...",\n'
             '    "characters": [\n'
             '      {"name": "角色名", "prompt_anchor": "英文外观锚点"}\n'
@@ -125,18 +139,27 @@ class ScriptPlanner:
             f"请生成 {idea.segment_count} 段脚本，总时长约 {idea.target_duration} 秒。"
         )
 
-        response = self.llm.chat(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.8,
-            json_mode=True,
-            max_tokens=2048,
-        )
+        max_tokens = self._estimate_max_tokens(idea)
+        data = self._request_script(system_prompt, user_prompt, max_tokens)
+        if not data.get("segments"):
+            retry_prompt = (
+                f"{user_prompt}\n\n"
+                "【重要】上次 JSON 输出不完整或未闭合。"
+                f"请输出完整、可解析的 JSON，segments 必须恰好 {idea.segment_count} 段。"
+                "visual_bible.characters 最多 2 个，字段尽量简短，但 segments 必须完整。"
+            )
+            log.warning("ScriptPlanner 首次解析无 segments，正在重试（max_tokens=%d）", max_tokens)
+            data = self._request_script(
+                system_prompt,
+                retry_prompt,
+                max(max_tokens, 6144),
+            )
 
-        # 解析 JSON
-        data = self._parse_response(response.content)
+        if not data.get("segments"):
+            raise ScriptPlanError(
+                "脚本生成失败：LLM 返回的 JSON 不完整或 segments 为空。"
+                "可尝试缩短目标时长（-d 45）或更换 LLM 模型后重试。"
+            )
 
         # 构建 VideoScript
         segments = []
@@ -177,12 +200,14 @@ class ScriptPlanner:
         if vb_data and isinstance(vb_data, dict):
             visual_bible = VisualBible(
                 style_tags=vb_data.get("style_tags", ""),
+                scene_anchor=vb_data.get("scene_anchor", ""),
                 negative_prompt=vb_data.get("negative_prompt", ""),
                 characters=vb_data.get("characters", []),
             )
             log.info(
-                "视觉圣经: style=%s, characters=%d",
+                "视觉圣经: style=%s, scene=%s, characters=%d",
                 visual_bible.style_tags[:50],
+                (visual_bible.scene_anchor[:50] if visual_bible.scene_anchor else "(无)"),
                 len(visual_bible.characters),
             )
 
@@ -200,29 +225,34 @@ class ScriptPlanner:
 
         return script
 
+    def _request_script(
+        self, system_prompt: str, user_prompt: str, max_tokens: int
+    ) -> dict:
+        response = self.llm.chat(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.8,
+            json_mode=True,
+            max_tokens=max_tokens,
+        )
+        if response.finish_reason == "length":
+            log.warning(
+                "ScriptPlanner LLM 输出触达 max_tokens=%d 被截断", max_tokens
+            )
+        return self._parse_response(response.content)
+
     def _parse_response(self, content: str) -> dict:
         """健壮的 JSON 解析"""
-        # 尝试直接解析
-        try:
-            return json.loads(content)
-        except json.JSONDecodeError:
-            pass
+        data = parse_llm_json(content)
+        if data is not None:
+            return data
 
-        # 尝试从 markdown 代码块提取
-        match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', content, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group(1))
-            except json.JSONDecodeError:
-                pass
-
-        # 尝试找 {...} 块
-        match = re.search(r'\{.*\}', content, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group())
-            except json.JSONDecodeError:
-                pass
+        data = close_truncated_json(content)
+        if data is not None:
+            log.warning("ScriptPlanner 通过补全括号解析截断 JSON")
+            return data
 
         log.error("ScriptPlanner 无法解析响应: %s", content[:300])
         return {"title": "解析失败", "segments": [], "ending_hook": ""}

@@ -39,8 +39,13 @@ class TestAnimeStylePrompt:
         assert "photorealistic" in out
 
     def test_local_mode_includes_anime_prefix(self):
-        gen = self._make_gen()
-        prompt = gen.generate("他站在门口，紧张地看着猫眼。", segment_index=0)
+        from unittest.mock import patch
+
+        from src.promptgen.prompt_generator import PromptGenerator
+
+        with patch.object(PromptGenerator, "_detect_llm_available", return_value=False):
+            gen = self._make_gen()
+            prompt = gen.generate("他站在门口，紧张地看着猫眼。", segment_index=0)
         assert "beautiful anime illustration" in prompt.lower()
         assert "cel shading" in prompt.lower()
 

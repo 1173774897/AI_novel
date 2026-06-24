@@ -1,12 +1,37 @@
 """IdeaPlanner - 将用户灵感转换为视频方案"""
 from __future__ import annotations
-import json
 import logging
-import re
 from src.llm.llm_client import LLMClient
+from src.scriptplan.json_utils import parse_llm_json
 from src.scriptplan.models import VideoIdea
 
 log = logging.getLogger("scriptplan")
+
+
+def _fallback_idea(target_duration: int, inspiration: str) -> VideoIdea:
+    """LLM 解析失败时的启发式默认方案（尽量贴合灵感关键词）。"""
+    comedy_kw = ("搞笑", "喜剧", "轻喜剧", "幽默", "沙雕", "橘猫", "猫咪", "猫")
+    is_comedy = any(k in inspiration for k in comedy_kw)
+    segment_count = max(6, min(12, target_duration // 5))
+    if is_comedy:
+        return VideoIdea(
+            video_type="搞笑",
+            target_duration=target_duration,
+            segment_count=segment_count,
+            rhythm="3秒钩子+多段笑点递进+1段收尾",
+            twist_type="无反转",
+            ending_type="评论钩子",
+            tone="搞笑",
+        )
+    return VideoIdea(
+        video_type="悬疑反转",
+        target_duration=target_duration,
+        segment_count=segment_count,
+        rhythm="3秒钩子+3段推进+1段反转+1段收尾",
+        twist_type="无反转",
+        ending_type="评论钩子",
+        tone="悬疑",
+    )
 
 
 class IdeaPlanner:
@@ -63,37 +88,10 @@ class IdeaPlanner:
         )
 
         # 解析 JSON
-        try:
-            data = json.loads(response.content)
-        except json.JSONDecodeError:
-            # 尝试从文本中提取 JSON
-            match = re.search(r'\{.*\}', response.content, re.DOTALL)
-            if match:
-                try:
-                    data = json.loads(match.group())
-                except json.JSONDecodeError:
-                    log.error("IdeaPlanner 正则提取的 JSON 无效: %s", match.group()[:200])
-                    return VideoIdea(
-                        video_type="悬疑反转",
-                        target_duration=target_duration,
-                        segment_count=6,
-                        rhythm="3秒钩子+3段推进+1段反转+1段收尾",
-                        twist_type="无反转",
-                        ending_type="评论钩子",
-                        tone="悬疑",
-                    )
-            else:
-                log.error("IdeaPlanner 返回非 JSON: %s", response.content[:200])
-                # 返回默认方案
-                return VideoIdea(
-                    video_type="悬疑反转",
-                    target_duration=target_duration,
-                    segment_count=6,
-                    rhythm="3秒钩子+3段推进+1段反转+1段收尾",
-                    twist_type="无反转",
-                    ending_type="评论钩子",
-                    tone="悬疑",
-                )
+        data = parse_llm_json(response.content)
+        if data is None:
+            log.error("IdeaPlanner 返回非 JSON: %s", (response.content or "")[:200])
+            return _fallback_idea(target_duration, inspiration)
 
         return VideoIdea(
             video_type=data.get("video_type", "悬疑反转"),

@@ -35,7 +35,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from PIL import Image
 
@@ -393,13 +393,113 @@ class JimengCliBackend(ImageGenerator):
             )
         return prepared
 
-    def generate(self, prompt: str) -> Image.Image:
+    def _build_dreamina_i2i_command(self, prompt: str, reference_images: list[Path]) -> list[str]:
+        poll = int(min(self._timeout, 600))
+        images_arg = ",".join(str(p) for p in reference_images)
+        cmd = [
+            self._command,
+            "image2image",
+            f"--images={images_arg}",
+            f"--prompt={prompt}",
+            f"--ratio={self._ratio}",
+            f"--resolution_type={self._resolution}",
+            f"--model_version={_normalize_model_version(self._model)}",
+            f"--poll={poll}",
+        ]
+        cmd.extend(self._extra_args)
+        return cmd
+
+    def _build_jimeng_edit_command(
+        self, prompt: str, reference_images: list[Path], output_dir: Path
+    ) -> list[str]:
+        cmd = [
+            self._command,
+            "image",
+            "edit",
+            "--prompt",
+            prompt,
+            "--model",
+            self._model,
+            "--ratio",
+            self._ratio,
+            "--resolution",
+            self._resolution,
+            "--region",
+            self._region,
+            "--output-dir",
+            str(output_dir),
+            "--wait",
+            "--json",
+        ]
+        for ref in reference_images:
+            cmd.extend(["--image", str(ref)])
+        if self._negative_prompt:
+            cmd.extend(["--negative-prompt", self._negative_prompt])
+        cmd.extend(self._extra_args)
+        return cmd
+
+    def _finalize_dreamina_image(self, stdout: str, output_dir: Path) -> Image.Image:
+        data = _parse_cli_json(stdout)
+        status = data.get("gen_status")
+        if status == "querying":
+            submit_id = data.get("submit_id")
+            if not submit_id:
+                raise RuntimeError("即梦 CLI 返回 querying 但缺少 submit_id")
+            data = self._poll_dreamina_result(submit_id, output_dir)
+        elif status == "fail":
+            reason = data.get("fail_reason") or "未知原因"
+            raise JimengGenerationError(reason)
+        elif status != "success":
+            raise RuntimeError(f"即梦 CLI 返回未知状态: {status!r}")
+        return self._image_from_dreamina_result(data, output_dir)
+
+    def _generate_dreamina_i2i(self, prompt: str, reference_images: list[Path], output_dir: Path) -> Image.Image:
+        result = self._run_cli(
+            self._build_dreamina_i2i_command(prompt, reference_images),
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()[:500]
+            raise RuntimeError(
+                f"即梦 CLI 图生图失败 (exit={result.returncode}): {detail}"
+            )
+        return self._finalize_dreamina_image(result.stdout, output_dir)
+
+    def _generate_jimeng_edit(
+        self, prompt: str, reference_images: list[Path], output_dir: Path
+    ) -> Image.Image:
+        result = self._run_cli(
+            self._build_jimeng_edit_command(prompt, reference_images, output_dir)
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()[:500]
+            raise RuntimeError(
+                f"即梦 CLI 图片编辑失败 (exit={result.returncode}): {detail}"
+            )
+        image_path = self._resolve_jimeng_image_path(result.stdout, output_dir)
+        image = Image.open(image_path)
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+        return image
+
+    def generate(
+        self,
+        prompt: str,
+        reference_images: list[Path] | None = None,
+        **kwargs: Any,
+    ) -> Image.Image:
         self._ensure_command_available()
         self._throttle()
         output_dir = self._resolve_output_dir()
         prompt = self._prepare_prompt(prompt)
+        refs = [Path(p) for p in (reference_images or []) if p and Path(p).is_file()]
 
-        if self._flavor == "dreamina":
+        if refs:
+            log.info("即梦 CLI 图生图/编辑: %d 张参考图", len(refs))
+            if self._flavor == "dreamina":
+                image = self._generate_dreamina_i2i(prompt, refs, output_dir)
+            else:
+                image = self._generate_jimeng_edit(prompt, refs, output_dir)
+        elif self._flavor == "dreamina":
             image = self._generate_dreamina(prompt, output_dir)
         else:
             image = self._generate_jimeng(prompt, output_dir)

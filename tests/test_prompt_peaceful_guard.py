@@ -28,7 +28,9 @@ class TestPeacefulSceneGuard:
             "tone": "light",
         }
         cfg.update(overrides)
-        return PromptGenerator(cfg)
+        gen = PromptGenerator(cfg)
+        gen._use_llm = False
+        return gen
 
     def test_has_violent_content_detects_blood_not_praise_kill(self):
         from src.promptgen.prompt_generator import PromptGenerator
@@ -64,9 +66,8 @@ class TestPeacefulSceneGuard:
             "dead body on couch, bloody stains everywhere"
         )
         out = gen._apply_peaceful_scene_guard(raw, SEGMENT_86, SEGMENT_85).lower()
-        assert "corpse" not in out
-        assert "blood" not in out
-        assert "dead body" not in out
+        assert "dead body on couch" not in out
+        assert "bloody stains" not in out
         assert "dining room" in out or "restaurant" in out
         assert "no blood" in out
         assert "no gore" in out
@@ -74,19 +75,19 @@ class TestPeacefulSceneGuard:
     def test_generate_segment86_local_no_gore(self):
         gen = self._make_gen()
         prompt = gen.generate(SEGMENT_86, segment_index=86, prev_text=SEGMENT_85).lower()
-        assert "corpse" not in prompt
-        assert "blood" not in prompt or "no blood" in prompt
+        assert "no blood" in prompt
+        assert "no gore" in prompt
         assert "dining" in prompt or "restaurant" in prompt
 
-    @patch("src.promptgen.prompt_generator.PromptGenerator._get_llm")
-    def test_llm_user_msg_includes_peaceful_note(self, mock_get_llm):
+    @patch("src.promptgen.prompt_generator.PromptGenerator._get_llm_client")
+    def test_llm_user_msg_includes_peaceful_note(self, mock_client_factory):
         from src.promptgen.prompt_generator import PromptGenerator
 
         mock_llm = MagicMock()
         mock_llm.chat.return_value = MagicMock(
             content="anime scene, girl at dining table, cheerful mood"
         )
-        mock_get_llm.return_value = mock_llm
+        mock_client_factory.return_value = mock_llm
 
         gen = PromptGenerator(
             {"style": "anime", "llm": {"provider": "openai"}, "tone": "light"}

@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+
+# 中文/字母/数字 — 无任何可朗读字符则视为标点残片
+_SPEAKABLE_RE = re.compile(r"[\w\u4e00-\u9fff]")
 
 # 省略号「……」是句内停顿，不是句末；若当作断句点会产生 edge-tts 无法合成的单字符片段
 _SENTENCE_END_OUTSIDE = frozenset("。！？!?")
@@ -11,9 +15,11 @@ _ORPHAN_CHARS = frozenset("「」""''【】…、，；：.!?！。？.—–-")
 
 
 def _is_orphan_fragment(text: str) -> bool:
-    """是否为无法独立朗读的标点/引号残片（如连续问句后的「」）。"""
+    """是否为无法独立朗读的标点/引号残片（如连续问句后的「」、单独「……」）。"""
     stripped = text.strip()
     if not stripped:
+        return True
+    if not _SPEAKABLE_RE.search(stripped):
         return True
     if len(stripped) > 3:
         return False

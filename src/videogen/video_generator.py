@@ -17,6 +17,8 @@ class VideoResult:
     duration: float  # 视频时长（秒）
     width: int  # 视频宽度
     height: int  # 视频高度
+    submit_id: str = ""  # 异步提交时的 dreamina/jimeng task id
+    pending: bool = False  # True 表示已提交、尚未出片
 
 
 class VideoGenerator(ABC):
@@ -74,5 +76,9 @@ def create_video_generator(config: dict) -> VideoGenerator:
         from src.videogen.sora_backend import SoraBackend
 
         return SoraBackend(config)
+    elif backend == "jimeng-cli":
+        from src.videogen.jimeng_cli_backend import JimengCliVideoBackend
+
+        return JimengCliVideoBackend(config)
     else:
         raise ValueError(f"Unknown video backend: {backend}")

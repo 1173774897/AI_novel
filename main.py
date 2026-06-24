@@ -1828,6 +1828,15 @@ def create_video(inspiration, duration, budget, config_path, workspace):
                 progress_callback=on_progress,
             )
 
+            status = result.get("status", "completed")
+            if status == "pending_video":
+                console.print(f"\n[bold yellow]⏳ 视频任务已提交，即梦排队中[/bold yellow]")
+                console.print(f"标题: {result['script'].get('title', '未命名')}")
+                console.print(f"待完成: {result.get('pending_count', '?')} 段视频")
+                console.print(f"工作目录: {result['run_dir']}")
+                console.print(f"\n{result.get('message', '')}")
+                return
+
             console.print(f"\n[bold green]✅ 视频生成完成！[/bold green]")
             console.print(f"标题: {result['script'].get('title', '未命名')}")
             console.print(f"时长: {result['duration']:.1f}s")
@@ -1837,6 +1846,227 @@ def create_video(inspiration, duration, budget, config_path, workspace):
 
         except Exception as exc:
             console.print(f"\n[bold red]❌ 生成失败: {exc}[/bold red]")
+            raise click.Abort()
+
+
+@cli.command("resume-video")
+@click.argument("run_dir", type=click.Path(exists=True, file_okay=False))
+@click.option("--config", "-c", "config_path", default=None, help="配置文件路径")
+def resume_video(run_dir, config_path):
+    """续跑 create-video：轮询即梦排队中的视频任务并合成成片。
+
+    RUN_DIR: 上次 create-video 输出的工作目录，如 workspace/videos/run_f2131239
+
+    示例:
+        python main.py resume-video workspace/videos/run_f2131239
+    """
+    from src.director_pipeline import DirectorPipeline
+    from rich.console import Console
+    from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
+
+    console = Console()
+    run_path = Path(run_dir)
+    console.print(f"\n[bold blue]🎬 续跑视频任务[/bold blue]")
+    console.print(f"工作目录: {run_path}\n")
+
+    pipeline = DirectorPipeline(config_path=config_path)
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("初始化...", total=100)
+
+        def on_progress(pct: float, desc: str):
+            progress.update(task, completed=int(pct * 100), description=desc)
+
+        try:
+            result = pipeline.resume(run_path, progress_callback=on_progress)
+            status = result.get("status", "completed")
+            if status == "pending_video":
+                console.print(f"\n[bold yellow]⏳ 仍有视频排队中[/bold yellow]")
+                console.print(f"待完成: {result.get('pending_count', '?')} 段")
+                console.print(f"\n{result.get('message', '')}")
+                return
+            console.print(f"\n[bold green]✅ 视频合成完成！[/bold green]")
+            console.print(f"路径: {result['video_path']}")
+        except Exception as exc:
+            console.print(f"\n[bold red]❌ 续跑失败: {exc}[/bold red]")
+            raise click.Abort()
+
+
+@cli.command("replace-video")
+@click.argument("source_video", type=click.Path(exists=True, dir_okay=False))
+@click.option(
+    "--character", "-r", required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="替换主角的参考形象图片",
+)
+@click.option("--prompt", "-p", default=None, help="multimodal2video 替换说明（留空用 config/默认）")
+@click.option(
+    "--extension-prompt", "-e",
+    default=None,
+    help="替换完成后追加扩演段说明（首帧锚定替换成片末帧，写入 job.json）",
+)
+@click.option(
+    "--extension-duration",
+    default=None,
+    type=float,
+    help="扩演段时长秒数（默认 config v2v_replace.extension_duration_sec 或 5）",
+)
+@click.option("--max-segment", "-m", default=None, type=float, help="单段最长秒数（默认 15）")
+@click.option("--no-audio", is_flag=True, help="不上传原片音轨")
+@click.option(
+    "--segment-anchor",
+    is_flag=True,
+    default=None,
+    help="第 2 段起用上一段成片末帧作衔接 anchor（默认读 config，通常关闭）",
+)
+@click.option("--config", "-c", "config_path", default=None, help="配置文件路径")
+@click.option("--workspace", "-w", default=None, help="工作目录，默认 workspace/v2v_replace")
+def replace_video(
+    source_video,
+    character,
+    prompt,
+    extension_prompt,
+    extension_duration,
+    max_segment,
+    no_audio,
+    segment_anchor,
+    config_path,
+    workspace,
+):
+    """Video→Video：切分原视频并逐段将主角替换为参考图形象（即梦 multimodal2video）。
+
+    可选 --segment-anchor / config v2v_replace.segment_anchor：第 2 段起用上一段
+    成片末帧衔接，各段须顺序生成。
+
+    示例:
+
+        python main.py replace-video input/clip.mp4 -r ref/cat.png
+        python main.py replace-video drama.mp4 -r ref/hero.jpg -m 12
+        python main.py replace-video clip.mp4 -r ref/cat.png \\
+            -e "狸花猫继续在书店里探索书架"
+    """
+    from src.v2v_replace_pipeline import V2VReplacePipeline
+    from rich.console import Console
+    from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
+
+    console = Console()
+    console.print("\n[bold blue]🎭 Video→Video 主角替换[/bold blue]")
+    console.print(f"源视频: {source_video}")
+    console.print(f"参考图: {character}\n")
+
+    pipeline = V2VReplacePipeline(config_path=config_path, workspace=workspace)
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("初始化...", total=100)
+
+        def on_progress(pct: float, desc: str):
+            progress.update(task, completed=int(pct * 100), description=desc)
+
+        try:
+            result = pipeline.run(
+                source_video,
+                character,
+                prompt=prompt,
+                extension_prompt=extension_prompt,
+                extension_duration=extension_duration,
+                max_segment_sec=max_segment,
+                keep_audio=not no_audio,
+                segment_anchor=segment_anchor,
+                progress_callback=on_progress,
+            )
+            status = result.get("status", "completed")
+            console.print(f"\n工作目录: {result['run_dir']}")
+            if status == "pending":
+                console.print(f"[bold yellow]⏳ 仍有片段排队中[/bold yellow]")
+                console.print(f"待完成: {result.get('pending_count', '?')} 段")
+                console.print(f"\n{result.get('message', '')}")
+                return
+            console.print(f"[bold green]✅ 替换完成[/bold green]")
+            console.print(f"成片: {result['video_path']}")
+            console.print(f"共 {result.get('segment_count', '?')} 段")
+            if result.get("has_extension"):
+                console.print("含扩演段")
+        except Exception as exc:
+            console.print(f"\n[bold red]❌ 失败: {exc}[/bold red]")
+            raise click.Abort()
+
+
+@cli.command("resume-replace-video")
+@click.argument("run_dir", type=click.Path(exists=True, file_okay=False))
+@click.option(
+    "--extension-prompt", "-e",
+    default=None,
+    help="为已完成替换的任务追加扩演段（写入 job.json 后生成）",
+)
+@click.option(
+    "--extension-duration",
+    default=None,
+    type=float,
+    help="扩演段时长秒数",
+)
+@click.option("--config", "-c", "config_path", default=None, help="配置文件路径")
+def resume_replace_video(
+    run_dir, extension_prompt, extension_duration, config_path
+):
+    """续跑 replace-video：轮询即梦任务并拼接成片。
+
+    示例:
+
+        python main.py resume-replace-video workspace/v2v_replace/run_a1b2c3d4
+        python main.py resume-replace-video workspace/v2v_replace/run_a1b2c3d4 \\
+            -e "狸花猫继续在书店里探索"
+    """
+    from src.v2v_replace_pipeline import V2VReplacePipeline
+    from rich.console import Console
+    from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
+
+    console = Console()
+    run_path = Path(run_dir)
+    console.print(f"\n[bold blue]🎭 续跑 v2v 替换[/bold blue]")
+    console.print(f"工作目录: {run_path}\n")
+
+    pipeline = V2VReplacePipeline(config_path=config_path)
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("初始化...", total=100)
+
+        def on_progress(pct: float, desc: str):
+            progress.update(task, completed=int(pct * 100), description=desc)
+
+        try:
+            result = pipeline.resume(
+                run_path,
+                extension_prompt=extension_prompt,
+                extension_duration=extension_duration,
+                progress_callback=on_progress,
+            )
+            if result.get("status") == "pending":
+                console.print(f"[bold yellow]⏳ 仍有片段排队中[/bold yellow]")
+                console.print(f"待完成: {result.get('pending_count', '?')} 段")
+                console.print(f"\n{result.get('message', '')}")
+                return
+            console.print(f"[bold green]✅ 替换完成[/bold green]")
+            console.print(f"成片: {result['video_path']}")
+        except Exception as exc:
+            console.print(f"\n[bold red]❌ 续跑失败: {exc}[/bold red]")
             raise click.Abort()
 
 

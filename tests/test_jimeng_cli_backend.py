@@ -161,6 +161,15 @@ class TestJimengCliBackendDreaminaFlavor:
         cmd = backend._build_dreamina_command("test")
         assert "--model_version=5.0" in cmd
 
+    def test_build_dreamina_i2i_command(self, tmp_path: Path):
+        ref = tmp_path / "anchor.png"
+        ref.write_bytes(b"png")
+        backend = self._make_backend()
+        cmd = backend._build_dreamina_i2i_command("same cat, new pose", [ref])
+        assert cmd[1] == "image2image"
+        assert f"--images={ref}" in cmd
+        assert "--prompt=same cat, new pose" in cmd
+
     @patch("src.imagegen.jimeng_cli_backend.subprocess.run")
     @patch("src.imagegen.jimeng_cli_backend.shutil.which", return_value="/usr/local/bin/dreamina")
     def test_generate_success_from_image_url(

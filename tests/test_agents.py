@@ -341,12 +341,17 @@ class TestDirectorAgent:
         assert result["analysis_needed"] is True
 
     def test_analyze_task_video_enabled_when_configured(self, minimal_config, sample_text):
-        """配置 videogen.backend 时 video_enabled=True。"""
-        minimal_config["videogen"] = {"backend": "kling"}
-        state = AgentState(
-            full_text=sample_text, config=minimal_config, budget_mode=False
+        """配置 agent.videogen.backend 时 video_enabled=True。"""
+        from src.config_manager import resolve_pipeline_config
+
+        cfg = resolve_pipeline_config(
+            {**minimal_config, "agent": {"videogen": {"backend": "kling"}}},
+            "agent",
         )
-        agent = DirectorAgent(minimal_config)
+        state = AgentState(
+            full_text=sample_text, config=cfg, budget_mode=False
+        )
+        agent = DirectorAgent(cfg)
         result = agent.analyze_task(state)
 
         assert result["video_enabled"] is True
