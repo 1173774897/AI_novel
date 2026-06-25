@@ -148,7 +148,8 @@ def repair_agent_state_data(
 
     full_text = data.get("full_text") or ""
     segments = data.get("segments") or []
-    needs_resegment = not segments or (image_count and len(segments) != image_count)
+    # 已有 segments 时不再按图片数重分段，避免「删后半段图只重生图」时破坏段对齐
+    needs_resegment = not segments
 
     if needs_resegment and full_text.strip():
         if image_count:
@@ -157,6 +158,13 @@ def repair_agent_state_data(
             segments = SegmentTool(config).run(full_text)
         data["segments"] = segments
         log.info("已重建 segments: %d 段", len(segments))
+    elif segments and image_count and len(segments) != image_count:
+        log.warning(
+            "segments=%d 与磁盘图片数=%d 不一致；保留已有 segments，"
+            "可删除指定段图片后重跑 art_director",
+            len(segments),
+            image_count,
+        )
 
     n_seg = len(data.get("segments") or [])
     if image_count:
@@ -181,7 +189,8 @@ def repair_agent_state_data(
         data["srt_files"] = srt_files
 
     # 下游节点未完成时，去掉可能因异常写入的 completed 标记
-    completed = set(data.get("completed_nodes") or [])
+    completed_list = dedupe_completed_nodes(data.get("completed_nodes"))
+    completed = set(completed_list)
     if "voice_director" in completed and len(audio_files) < n_seg:
         completed.discard("voice_director")
         completed.discard("editor")
@@ -190,8 +199,15 @@ def repair_agent_state_data(
             len(audio_files),
             n_seg,
         )
+    if "art_director" in completed and n_seg and image_count < n_seg:
+        completed.discard("art_director")
+        log.info(
+            "图片仅 %d/%d，移除 art_director 完成标记以续跑生图",
+            image_count,
+            n_seg,
+        )
     if "editor" in completed and not data.get("final_video"):
         completed.discard("editor")
 
-    data["completed_nodes"] = dedupe_completed_nodes(list(completed))
+    data["completed_nodes"] = [n for n in completed_list if n in completed]
     return data

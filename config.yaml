@@ -218,6 +218,8 @@ agent:
     reviewer_provider: dashscope  # LLM provider：dashscope | gemini | deepseek 等
     reviewer_model: qwen3.7-max  # 百炼 Qwen 模型名
     temperature: 0.2
+  visual_state_review:
+    enabled: true              # 分段外观拆分后由审核员 B 去重定稿（默认同 character_review）
 #   quality_check:
 #     enabled: true
 #     threshold: 6.0

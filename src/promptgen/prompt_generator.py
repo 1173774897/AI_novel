@@ -19,6 +19,7 @@ from src.promptgen.narrator import (
     segment_has_first_person,
 )
 from src.promptgen.style_presets import get_preset
+from src.promptgen.visual_state import resolve_character_desc
 from src.promptgen.era_context import (
     CLASSICAL,
     CLASSICAL_IMAGE_LLM_NOTE,
@@ -665,27 +666,29 @@ class PromptGenerator:
             return desc
         return desc[: max_chars - 1].rstrip() + "…"
 
-    def _resolve_narrator_visual(self) -> tuple[str | None, str]:
+    def _resolve_narrator_visual(self, segment_index: int = 0) -> tuple[str | None, str]:
         return resolve_narrator_visual(
-            self._pov_narrator_name, self._seeded_characters
+            self._pov_narrator_name,
+            self._seeded_characters,
+            segment_index=segment_index,
         )
 
-    def _narrator_has_visual_identity(self) -> bool:
-        name, desc = self._resolve_narrator_visual()
+    def _narrator_has_visual_identity(self, segment_index: int = 0) -> bool:
+        name, desc = self._resolve_narrator_visual(segment_index)
         return bool(name and desc)
 
-    def _narrator_cast_names(self, text: str) -> list[str]:
+    def _narrator_cast_names(self, text: str, segment_index: int = 0) -> list[str]:
         """第一人称叙述时，仅在有明确身份+外观时注入叙述者。"""
-        name, _ = self._resolve_narrator_visual()
+        name, _ = self._resolve_narrator_visual(segment_index)
         if name:
             return [name]
         return []
 
-    def _build_cast_bible(self, text: str) -> str:
+    def _build_cast_bible(self, text: str, *, segment_index: int = 0) -> str:
         """本段相关角色设定（非全片卡司），避免 prompt 过长触发即梦 InvalidNode。"""
         names: list[str] = []
         seen: set[str] = set()
-        for name in self._narrator_cast_names(text) + self._resolve_segment_characters(
+        for name in self._narrator_cast_names(text, segment_index) + self._resolve_segment_characters(
             text
         ):
             if name and name not in seen:
@@ -711,7 +714,7 @@ class PromptGenerator:
                 if entry_name != name:
                     continue
                 desc = self._truncate_cast_desc(
-                    str(entry.get("desc", "")).strip(),
+                    resolve_character_desc(entry, segment_index),
                     self._CAST_DESC_MAX_CHARS,
                 )
                 if desc:
@@ -763,7 +766,11 @@ class PromptGenerator:
         return False
 
     def _build_character_context(
-        self, text: str, prev_text: str | None = None
+        self,
+        text: str,
+        prev_text: str | None = None,
+        *,
+        segment_index: int = 0,
     ) -> tuple[str, str]:
         """组装角色外观描述与叙述者约束说明。"""
         narrator_prompt = ""
@@ -774,13 +781,13 @@ class PromptGenerator:
             scene_prompt, scene_instruction = "", ""
             if not author_pov or narrator_physically_present(text):
                 scene_prompt, scene_instruction = build_scene_character_context(
-                    text, prev_text, self._seeded_characters
+                    text, prev_text, self._seeded_characters, segment_index=segment_index
                 )
             if scene_instruction:
                 narrator_prompt = scene_prompt
                 narrator_instruction = scene_instruction
             else:
-                narrator_name, narrator_desc = self._resolve_narrator_visual()
+                narrator_name, narrator_desc = self._resolve_narrator_visual(segment_index)
                 if narrator_name and narrator_desc:
                     _, narrator_instruction = build_narrator_instruction_from_identity(
                         narrator_name, narrator_desc
@@ -799,7 +806,7 @@ class PromptGenerator:
             )
 
         parts: list[str] = []
-        cast_bible = self._build_cast_bible(text)
+        cast_bible = self._build_cast_bible(text, segment_index=segment_index)
         if cast_bible:
             parts.append(cast_bible)
 
@@ -809,6 +816,7 @@ class PromptGenerator:
             tracker_prompt = self._tracker.get_character_prompt(
                 characters,
                 allowed_names=self._seeded_names or None,
+                segment_index=segment_index,
             )
             if tracker_prompt:
                 parts.append(f"【本段出场角色】{tracker_prompt}")
@@ -858,7 +866,7 @@ class PromptGenerator:
 
         # 提取角色信息 + 叙述者绑定
         character_prompt, narrator_instruction = self._build_character_context(
-            text, prev_text=prev_text
+            text, prev_text=prev_text, segment_index=segment_index
         )
 
         # 根据模式生成 prompt
@@ -903,7 +911,7 @@ class PromptGenerator:
         hint_cn, hint_en = alternate_angle_hint(variant)
         visual_text = self._visual_source_text(text)
         character_prompt, narrator_instruction = self._build_character_context(
-            text, prev_text=prev_text
+            text, prev_text=prev_text, segment_index=segment_index
         )
 
         if self._use_llm:
@@ -988,7 +996,7 @@ class PromptGenerator:
 
         # 提取角色信息 + 叙述者绑定
         character_prompt, narrator_instruction = self._build_character_context(
-            segment_text, prev_text=prev_text
+            segment_text, prev_text=prev_text, segment_index=segment_index
         )
 
         # 根据模式生成 prompt

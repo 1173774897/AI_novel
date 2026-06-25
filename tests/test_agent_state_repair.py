@@ -106,6 +106,32 @@ class TestRepairAgentStateData:
         repaired = repair_agent_state_data(data, cfg, ws)
         assert repaired["completed_nodes"] == ["director", "content_analyzer"]
 
+    def test_preserves_segments_when_fewer_images_than_segments(self, tmp_path):
+        ws = tmp_path / "proj"
+        img_dir = ws / "images"
+        img_dir.mkdir(parents=True)
+        for i in range(3):
+            (img_dir / f"{i:04d}.png").write_bytes(b"fake")
+
+        segments = [{"text": f"段{i}", "index": i} for i in range(5)]
+        data = {
+            "full_text": "x" * 100,
+            "segments": segments,
+            "images": [],
+            "completed_nodes": [
+                "director",
+                "content_analyzer",
+                "art_director",
+            ],
+        }
+        cfg = {"segmenter": {"method": "simple", "max_chars": 100, "min_chars": 1}}
+        repaired = repair_agent_state_data(data, cfg, ws)
+
+        assert len(repaired["segments"]) == 5
+        assert repaired["segments"] == segments
+        assert "art_director" not in repaired["completed_nodes"]
+        assert len(repaired["images"]) == 3
+
 
 class TestAgentPipelineLoadRepair:
     @pytest.fixture

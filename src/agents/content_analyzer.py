@@ -1122,6 +1122,41 @@ def content_analyzer_node(state: AgentState) -> dict:
         ))
         log.info("[ContentAnalyzer] 叙述者 POV 锁定: %s", pov_narrator)
 
+    from src.promptgen.visual_state_planner import apply_visual_states_to_characters
+
+    try:
+        llm = None if budget_mode else agent._get_llm()
+    except Exception:
+        llm = None
+    characters, vs_discussion = apply_visual_states_to_characters(
+        characters,
+        segments,
+        llm=llm,
+        budget_mode=budget_mode,
+        config=config,
+        full_text=state["full_text"],
+    )
+    planned = [
+        c.get("name")
+        for c in characters
+        if isinstance(c, dict) and c.get("visual_states")
+    ]
+    if planned:
+        decisions.append(make_decision(
+            "ContentAnalyzer",
+            "visual_states",
+            f"分段外观规划 {len(planned)} 个角色",
+            f"角色: {planned}",
+        ))
+        log.info("[ContentAnalyzer] visual_states 已规划: %s", planned)
+    if vs_discussion:
+        decisions.append(make_decision(
+            "ContentAnalyzer",
+            "visual_state_review",
+            f"分段外观审核定稿 {len(planned)} 个角色",
+            "\n".join(vs_discussion)[:800],
+        ))
+
     if agent._last_character_review_log:
         decisions.append(make_decision(
             "ContentAnalyzer",

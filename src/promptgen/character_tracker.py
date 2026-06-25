@@ -4,6 +4,8 @@ import re
 import logging
 from typing import Any
 
+from src.promptgen.visual_state import normalize_visual_states, resolve_character_desc
+
 log = logging.getLogger("novel")
 
 # 常见单字动词（出现在名字后面，用于识别「姓名+动作」结构）
@@ -126,6 +128,7 @@ class CharacterTracker:
 
     def __init__(self) -> None:
         self._characters: dict[str, str] = {}
+        self._visual_states: dict[str, list[dict[str, Any]]] = {}
         self._mention_count: dict[str, int] = {}
 
     @property
@@ -199,6 +202,11 @@ class CharacterTracker:
             desc = str(entry.get("desc", "")).strip()
             if not name or not desc:
                 continue
+            raw_states = entry.get("visual_states")
+            if isinstance(raw_states, list) and raw_states:
+                normalized = normalize_visual_states(raw_states)
+                if normalized:
+                    self._visual_states[name] = normalized
             if canonical or name not in self._characters:
                 if self._characters.get(name) != desc:
                     self._characters[name] = desc
@@ -209,11 +217,21 @@ class CharacterTracker:
 
         return seeded
 
+    def get_desc(self, name: str, segment_index: int = 0) -> str:
+        """按 segment_index 解析角色外观（含 visual_states 版本切换）。"""
+        entry: dict[str, Any] = {
+            "name": name,
+            "desc": self._characters.get(name, ""),
+            "visual_states": self._visual_states.get(name),
+        }
+        return resolve_character_desc(entry, segment_index)
+
     def get_character_prompt(
         self,
         characters: list[str],
         *,
         allowed_names: frozenset[str] | None = None,
+        segment_index: int = 0,
     ) -> str:
         """为已知角色生成描述性 prompt 片段。
 
@@ -231,8 +249,8 @@ class CharacterTracker:
         for name in characters:
             if allowed_names is not None and name not in allowed_names:
                 continue
-            if name in self._characters and self._characters[name]:
-                desc = self._characters[name]
+            desc = self.get_desc(name, segment_index)
+            if desc:
                 if desc not in seen:
                     descriptions.append(desc)
                     seen.add(desc)
@@ -320,10 +338,17 @@ class CharacterTracker:
         """序列化为字典（用于存储/恢复状态）。"""
         return {
             "characters": dict(self._characters),
+            "visual_states": {k: list(v) for k, v in self._visual_states.items()},
             "mention_count": dict(self._mention_count),
         }
 
     def from_dict(self, data: dict[str, Any]) -> None:
         """从字典恢复状态。"""
         self._characters = dict(data.get("characters", {}))
+        raw_states = data.get("visual_states", {})
+        self._visual_states = {
+            str(k): normalize_visual_states(v if isinstance(v, list) else [])
+            for k, v in raw_states.items()
+            if normalize_visual_states(v if isinstance(v, list) else [])
+        }
         self._mention_count = dict(data.get("mention_count", {}))

@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
+from src.promptgen.visual_state import resolve_character_desc
+
 NarratorVoice = Literal["male", "female"]
 
 _FEMALE_MARKERS = re.compile(r"本姑娘|本小姐|本女")
@@ -181,13 +183,16 @@ def find_quotation_speaker(
 
 
 def _get_character_desc(
-    name: str, seeded_characters: list[dict[str, Any]]
+    name: str,
+    seeded_characters: list[dict[str, Any]],
+    *,
+    segment_index: int = 0,
 ) -> str:
     for entry in seeded_characters:
         if not isinstance(entry, dict):
             continue
         if str(entry.get("name", "")).strip() == name:
-            return str(entry.get("desc", "")).strip()
+            return resolve_character_desc(entry, segment_index)
     return ""
 
 
@@ -195,13 +200,15 @@ def build_quotation_speaker_context(
     text: str,
     prev_text: str | None,
     seeded_characters: list[dict[str, Any]],
+    *,
+    segment_index: int = 0,
 ) -> tuple[str, str]:
     """引号内第一人称对白的说话者外观与 LLM 约束说明。"""
     speaker = find_quotation_speaker(text, prev_text, seeded_characters)
     if not speaker:
         return "", ""
 
-    desc = _get_character_desc(speaker, seeded_characters)
+    desc = _get_character_desc(speaker, seeded_characters, segment_index=segment_index)
     if not desc:
         return "", ""
 
@@ -242,14 +249,17 @@ def find_interrogation_addressee(
 
 
 def build_interrogation_addressee_context(
-    text: str, seeded_characters: list[dict[str, Any]]
+    text: str,
+    seeded_characters: list[dict[str, Any]],
+    *,
+    segment_index: int = 0,
 ) -> tuple[str, str]:
     """张得胜向特定角色提问时，绑定被问者外观（非林映洁）。"""
     focus = find_interrogation_addressee(text, seeded_characters)
     if not focus:
         return "", ""
 
-    desc = _get_character_desc(focus, seeded_characters)
+    desc = _get_character_desc(focus, seeded_characters, segment_index=segment_index)
     if not desc:
         return "", ""
 
@@ -265,6 +275,8 @@ def build_dialogue_scene_context(
     text: str,
     prev_text: str | None,
     seeded_characters: list[dict[str, Any]],
+    *,
+    segment_index: int = 0,
 ) -> tuple[str, str]:
     """多人对话场景（如周玲与张得胜对答），须同时呈现各方外观。"""
     seeded_names = _seeded_name_set(seeded_characters)
@@ -277,7 +289,7 @@ def build_dialogue_scene_context(
 
     lines: list[str] = []
     for name in participants:
-        desc = _get_character_desc(name, seeded_characters)
+        desc = _get_character_desc(name, seeded_characters, segment_index=segment_index)
         if desc:
             lines.append(f"{name}：{desc}")
 
@@ -339,14 +351,17 @@ def find_reaction_focus_character(
 
 
 def build_reaction_focus_context(
-    text: str, seeded_characters: list[dict[str, Any]]
+    text: str,
+    seeded_characters: list[dict[str, Any]],
+    *,
+    segment_index: int = 0,
 ) -> tuple[str, str]:
     """被指认/情绪反应段：绑定焦点角色外观（如短发周玲）。"""
     focus = find_reaction_focus_character(text, seeded_characters)
     if not focus:
         return "", ""
 
-    desc = _get_character_desc(focus, seeded_characters)
+    desc = _get_character_desc(focus, seeded_characters, segment_index=segment_index)
     if not desc:
         return "", ""
 
@@ -363,14 +378,17 @@ def build_reaction_focus_context(
 
 
 def build_observed_character_context(
-    text: str, seeded_characters: list[dict[str, Any]]
+    text: str,
+    seeded_characters: list[dict[str, Any]],
+    *,
+    segment_index: int = 0,
 ) -> tuple[str, str]:
     """男主视角下的观察镜头：焦点是被看/被写的角色，而非男主自身。"""
     focus = find_visual_focus_character(text, seeded_characters)
     if not focus:
         return "", ""
 
-    desc = _get_character_desc(focus, seeded_characters)
+    desc = _get_character_desc(focus, seeded_characters, segment_index=segment_index)
     if not desc:
         return "", ""
 
@@ -386,35 +404,37 @@ def build_scene_character_context(
     text: str,
     prev_text: str | None,
     seeded_characters: list[dict[str, Any]],
+    *,
+    segment_index: int = 0,
 ) -> tuple[str, str]:
     """按优先级选择对白场景、独白说话人或默认叙述者绑定。"""
     reaction_prompt, reaction_instruction = build_reaction_focus_context(
-        text, seeded_characters
+        text, seeded_characters, segment_index=segment_index
     )
     if reaction_instruction:
         return reaction_prompt, reaction_instruction
 
     dialogue_prompt, dialogue_instruction = build_dialogue_scene_context(
-        text, prev_text, seeded_characters
+        text, prev_text, seeded_characters, segment_index=segment_index
     )
     if dialogue_instruction:
         return dialogue_prompt, dialogue_instruction
 
     if not _has_protagonist_narration(text):
         inter_prompt, inter_instruction = build_interrogation_addressee_context(
-            text, seeded_characters
+            text, seeded_characters, segment_index=segment_index
         )
         if inter_instruction:
             return inter_prompt, inter_instruction
 
     quote_prompt, quote_instruction = build_quotation_speaker_context(
-        text, prev_text, seeded_characters
+        text, prev_text, seeded_characters, segment_index=segment_index
     )
     if quote_instruction and not _has_protagonist_narration(text):
         return quote_prompt, quote_instruction
 
     observed_prompt, observed_instruction = build_observed_character_context(
-        text, seeded_characters
+        text, seeded_characters, segment_index=segment_index
     )
     if observed_instruction:
         return observed_prompt, observed_instruction
@@ -488,6 +508,8 @@ def is_generic_narrator_desc(desc: str) -> bool:
 def resolve_narrator_visual(
     pov_narrator_name: str | None,
     seeded_characters: list[dict[str, Any]],
+    *,
+    segment_index: int = 0,
 ) -> tuple[str | None, str]:
     """解析可入画的叙述者：须 pov 锁定或预填别名，且具非泛化外观描述。"""
     seeded = {
@@ -503,7 +525,7 @@ def resolve_narrator_visual(
             candidates.append(alias)
 
     for name in candidates:
-        desc = _get_character_desc(name, seeded_characters)
+        desc = _get_character_desc(name, seeded_characters, segment_index=segment_index)
         if desc and not is_generic_narrator_desc(desc):
             return name, desc
     return None, ""
